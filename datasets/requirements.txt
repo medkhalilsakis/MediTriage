@@ -1,0 +1,8 @@
+pandas>=1.3
+scikit-learn>=1.0
+joblib>=1.1
+numpy>=1.21
+scipy
+shap
+flask        # utile si tu veux tester une API rapide (option)
+djangorestframework>=3.12   # seulement si tu utilises Django
