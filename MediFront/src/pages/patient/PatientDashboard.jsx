@@ -9,6 +9,7 @@ import {
   CalendarClock,
   CalendarPlus,
   ClipboardList,
+  MessageSquare,
   ShieldCheck,
   Stethoscope,
 } from 'lucide-react'
@@ -270,13 +271,12 @@ function PatientDashboard() {
   }
 
   return (
-    <div className="stacked-grid">
-      <section className="card page-hero patient-dashboard-hero">
+    <div className="stacked-grid dashboard-surface dashboard-compact dashboard-patient">
+      <section className="card page-hero patient-dashboard-hero hero-with-visual">
         <p className="auth-eyebrow">Patient Dashboard</p>
         <h2>Your central care journey workspace</h2>
         <p className="muted">
-          Access chatbot, appointments, medical history, follow-up plans, notifications, and account security in one
-          place.
+          Access appointments, medical history, follow-up plans, notifications, and account security in one place.
         </p>
         <div className="patient-hero-actions">
           <a href="#book-appointment" className="ghost-btn inline-action patient-inline-action">
@@ -291,6 +291,13 @@ function PatientDashboard() {
             <ShieldCheck size={16} />
             Account & security
           </Link>
+          <Link to="/patient/messages" className="ghost-btn inline-action patient-inline-action">
+            <MessageSquare size={16} />
+            Messaging with doctor/admin
+          </Link>
+        </div>
+        <div className="hero-visual" aria-hidden="true">
+          <img src="/visuals/dashboard-hero.svg" alt="" />
         </div>
       </section>
 
@@ -317,9 +324,24 @@ function PatientDashboard() {
         </article>
       </section>
 
+      <section className="card messaging-dashboard-section">
+        <div className="inline-header">
+          <h3>
+            <MessageSquare size={18} />
+            Realtime messaging section
+          </h3>
+          <Link className="ghost-btn inline-action" to="/patient/messages">
+            Open messaging center
+          </Link>
+        </div>
+        <p className="muted">
+          Contact your assigned doctors from appointments and the admin team in real time with online/offline status.
+        </p>
+      </section>
+
       {isAnyLoading ? <p className="muted">Loading patient dashboard...</p> : null}
 
-      <div className="split-grid patient-dashboard-grid">
+      <div className="split-grid patient-dashboard-grid dashboard-columns">
         <div className="stacked-grid">
           <section id="book-appointment" className="card">
             <div className="inline-header">
@@ -401,7 +423,7 @@ function PatientDashboard() {
               </Link>
             </div>
 
-            <div className="timeline">
+            <div className="timeline compact-scroll">
               {upcomingAppointments.length === 0 ? (
                 <p className="muted">No upcoming appointment. You can book one directly above.</p>
               ) : null}
@@ -465,7 +487,7 @@ function PatientDashboard() {
               <span className="chip">Response window: 15 minutes</span>
             </div>
 
-            <div className="timeline">
+            <div className="timeline compact-scroll">
               {pendingAdvanceOffers.length === 0 ? (
                 <p className="muted">No early-slot proposal at this moment.</p>
               ) : null}
@@ -568,7 +590,7 @@ function PatientDashboard() {
               <span className="chip">Care plans & reminders</span>
             </div>
 
-            <div className="timeline">
+            <div className="timeline compact-scroll">
               {followUps.slice(0, 4).map((followUp) => (
                 <article key={followUp.id} className="timeline-item">
                   <p className="muted">{new Date(followUp.scheduled_at).toLocaleString()}</p>
@@ -608,12 +630,12 @@ function PatientDashboard() {
               </Link>
             </div>
 
-            <div className="timeline">
+            <div className="timeline compact-scroll">
               {pendingDocumentRequests.length === 0 ? (
                 <p className="muted">No pending document request from your doctor.</p>
               ) : null}
 
-              {pendingDocumentRequests.slice(0, 5).map((item) => (
+              {pendingDocumentRequests.slice(0, 4).map((item) => (
                 <article key={item.id} className="timeline-item unread">
                   <p>
                     <strong>{item.title}</strong>
@@ -720,8 +742,8 @@ function PatientDashboard() {
               </div>
             </div>
 
-            <div className="timeline">
-              {notifications.slice(0, 5).map((item) => (
+            <div className="timeline compact-scroll">
+              {notifications.slice(0, 4).map((item) => (
                 <article key={item.id} className={item.is_read ? 'timeline-item read' : 'timeline-item unread'}>
                   <h4>{item.title}</h4>
                   <p>{item.message}</p>

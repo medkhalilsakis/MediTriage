@@ -11,7 +11,7 @@ class FollowUpAlertSerializer(serializers.ModelSerializer):
 
 
 class FollowUpSerializer(serializers.ModelSerializer):
-    patient_email = serializers.EmailField(source='patient.user.email', read_only=True)
+    patient_email = serializers.SerializerMethodField()
     doctor_email = serializers.EmailField(source='doctor.user.email', read_only=True)
     alerts = FollowUpAlertSerializer(many=True, read_only=True)
 
@@ -32,3 +32,9 @@ class FollowUpSerializer(serializers.ModelSerializer):
             'updated_at',
         )
         read_only_fields = ('created_at', 'updated_at')
+
+    def get_patient_email(self, obj):
+        patient = getattr(obj, 'patient', None)
+        if not patient:
+            return 'deleted user'
+        return patient.get_public_identity_label()

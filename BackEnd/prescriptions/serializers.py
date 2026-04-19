@@ -12,7 +12,7 @@ class PrescriptionItemSerializer(serializers.ModelSerializer):
 class PrescriptionSerializer(serializers.ModelSerializer):
     items = PrescriptionItemSerializer(many=True)
     doctor_email = serializers.EmailField(source='doctor.user.email', read_only=True)
-    patient_email = serializers.EmailField(source='patient.user.email', read_only=True)
+    patient_email = serializers.SerializerMethodField()
 
     class Meta:
         model = Prescription
@@ -48,3 +48,9 @@ class PrescriptionSerializer(serializers.ModelSerializer):
             for item_data in items_data:
                 PrescriptionItem.objects.create(prescription=instance, **item_data)
         return instance
+
+    def get_patient_email(self, obj):
+        patient = getattr(obj, 'patient', None)
+        if not patient:
+            return 'deleted user'
+        return patient.get_public_identity_label()

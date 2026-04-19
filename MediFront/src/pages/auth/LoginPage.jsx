@@ -33,8 +33,9 @@ function LoginPage() {
   return (
     <div className="auth-page">
       <form className="auth-card" onSubmit={handleSubmit((values) => mutation.mutate(values))}>
+        <img src="/visuals/meditriage-logo.svg" alt="MediTriage" className="auth-brand-logo" />
         <p className="auth-eyebrow">Digital Care Platform</p>
-        <h1 className="auth-title">Sign In To MediSmart</h1>
+        <h1 className="auth-title">Sign In To MediTriage</h1>
         <p className="auth-note">Access triage, consultations, and patient follow-up in one secure workspace.</p>
         <input placeholder="Email" {...register('email')} />
         <p className="error">{errors.email?.message}</p>

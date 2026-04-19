@@ -23,3 +23,8 @@ export const listChatSessions = async () => {
 export const deleteChatSession = async (sessionId) => {
   await axiosInstance.delete(`/chatbot/sessions/${sessionId}/`)
 }
+
+export const sendPublicChatMessage = async (payload) => {
+  const { data } = await axiosInstance.post('/chatbot/public/message/', payload)
+  return data
+}

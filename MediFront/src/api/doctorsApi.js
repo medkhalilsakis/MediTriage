@@ -39,3 +39,13 @@ export const cancelDoctorLeave = async (id) => {
   const { data } = await axiosInstance.post(`/doctors/leaves/${id}/cancel/`)
   return data
 }
+
+export const deactivateDoctorAccount = async (id) => {
+  const { data } = await axiosInstance.post(`/doctors/profiles/${id}/deactivate/`)
+  return data
+}
+
+export const reactivateDoctorAccount = async (id) => {
+  const { data } = await axiosInstance.post(`/doctors/profiles/${id}/reactivate/`)
+  return data
+}

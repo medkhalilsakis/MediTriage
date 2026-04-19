@@ -6,7 +6,7 @@ from .scheduling import DEFAULT_END_TIME, DEFAULT_START_TIME
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
-    patient_email = serializers.EmailField(source='patient.user.email', read_only=True)
+    patient_email = serializers.SerializerMethodField()
     doctor_email = serializers.EmailField(source='doctor.user.email', read_only=True)
     department_label = serializers.CharField(source='get_department_display', read_only=True)
 
@@ -65,9 +65,15 @@ class AppointmentSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def get_patient_email(self, obj):
+        patient = getattr(obj, 'patient', None)
+        if not patient:
+            return 'deleted user'
+        return patient.get_public_identity_label()
+
 
 class AppointmentAdvanceOfferSerializer(serializers.ModelSerializer):
-    patient_email = serializers.EmailField(source='appointment.patient.user.email', read_only=True)
+    patient_email = serializers.SerializerMethodField()
     doctor_email = serializers.EmailField(source='offered_doctor.user.email', read_only=True)
     current_scheduled_at = serializers.DateTimeField(source='appointment.scheduled_at', read_only=True)
 
@@ -97,3 +103,9 @@ class AppointmentAdvanceOfferSerializer(serializers.ModelSerializer):
             'responded_at',
             'created_at',
         )
+
+    def get_patient_email(self, obj):
+        patient = getattr(getattr(obj, 'appointment', None), 'patient', None)
+        if not patient:
+            return 'deleted user'
+        return patient.get_public_identity_label()

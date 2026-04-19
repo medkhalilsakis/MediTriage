@@ -107,8 +107,9 @@ function RegisterPage() {
   return (
     <div className="auth-page">
       <form className="auth-card" onSubmit={handleSubmit((values) => mutation.mutate(values))}>
+        <img src="/visuals/meditriage-logo.svg" alt="MediTriage" className="auth-brand-logo" />
         <p className="auth-eyebrow">Start Your Workspace</p>
-        <h1 className="auth-title">Create MediSmart Account</h1>
+        <h1 className="auth-title">Create MediTriage Account</h1>
         <p className="auth-note">Set your role and join a unified care journey for patients, doctors, and admins.</p>
         <input placeholder="Email" {...register('email')} />
         <p className="error">{errors.email?.message}</p>

@@ -12,6 +12,10 @@ class DoctorAvailabilitySlotSerializer(serializers.ModelSerializer):
 
 class DoctorProfileSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source='user.email', read_only=True)
+    user_first_name = serializers.CharField(source='user.first_name', read_only=True)
+    user_last_name = serializers.CharField(source='user.last_name', read_only=True)
+    user_is_active = serializers.BooleanField(source='user.is_active', read_only=True)
+    user_profile_image_url = serializers.SerializerMethodField()
     department_label = serializers.CharField(source='get_department_display', read_only=True)
     availability_slots = DoctorAvailabilitySlotSerializer(many=True, read_only=True)
 
@@ -21,6 +25,10 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
             'id',
             'user',
             'user_email',
+            'user_first_name',
+            'user_last_name',
+            'user_is_active',
+            'user_profile_image_url',
             'specialization',
             'department',
             'department_label',
@@ -33,6 +41,15 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
             'updated_at',
         )
         read_only_fields = ('created_at', 'updated_at')
+
+    def get_user_profile_image_url(self, obj):
+        if not obj.user.profile_image:
+            return ''
+
+        request = self.context.get('request')
+        if request:
+            return request.build_absolute_uri(obj.user.profile_image.url)
+        return obj.user.profile_image.url
 
 
 class DoctorLeaveSerializer(serializers.ModelSerializer):

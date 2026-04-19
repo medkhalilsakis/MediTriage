@@ -4,10 +4,11 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from appointments.models import Appointment
 from appointments.scheduling import assign_doctor_and_slot
-from .ai_service import analyze_symptoms
+from .ai_service import analyze_symptoms, build_health_chat_response
 from doctors.models import DoctorProfile
 from .models import ChatbotMessage, ChatbotSession
 from .serializers import ChatbotMessageSerializer, ChatbotSendMessageSerializer, ChatbotSessionSerializer
@@ -50,6 +51,50 @@ DEPARTMENT_TO_APPOINTMENT = {
 	'endocrinology': Appointment.Department.ENDOCRINOLOGY,
 	'general medicine': Appointment.Department.GENERAL_MEDICINE,
 }
+
+
+class PublicChatbotMessageView(APIView):
+	permission_classes = [permissions.AllowAny]
+	authentication_classes = []
+
+	def post(self, request):
+		serializer = ChatbotSendMessageSerializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+
+		content = serializer.validated_data['content']
+		wants_appointment = serializer.validated_data.get('wants_appointment', False)
+
+		assistant_payload = build_health_chat_response(
+			content,
+			wants_appointment=wants_appointment,
+			require_auth_for_booking=True,
+		)
+
+		analysis = assistant_payload.get('analysis')
+		bot_metadata = {
+			'response_type': assistant_payload.get('response_type'),
+			'booking_auth_required': assistant_payload.get('booking_auth_required', False),
+		}
+		if analysis:
+			bot_metadata['analysis'] = analysis
+
+		return Response(
+			{
+				'patient_message': {
+					'sender': ChatbotMessage.Sender.PATIENT,
+					'content': content,
+				},
+				'bot_message': {
+					'sender': ChatbotMessage.Sender.BOT,
+					'content': assistant_payload.get('reply', ''),
+					'metadata': bot_metadata,
+				},
+				'analysis': analysis,
+				'response_type': assistant_payload.get('response_type'),
+				'booking_auth_required': assistant_payload.get('booking_auth_required', False),
+			},
+			status=status.HTTP_200_OK,
+		)
 
 
 class ChatbotSessionViewSet(viewsets.ModelViewSet):
@@ -213,50 +258,69 @@ class ChatbotSessionViewSet(viewsets.ModelViewSet):
 			session.awaiting_appointment_confirmation = False
 			session.save(update_fields=['awaiting_appointment_confirmation', 'updated_at'])
 
-		analysis = analyze_symptoms(
+		assistant_payload = build_health_chat_response(
+			patient_content,
+			wants_appointment=True,
+			require_auth_for_booking=False,
+		)
+
+		if assistant_payload.get('response_type') != 'triage':
+			analysis = assistant_payload.get('analysis') or {}
+			session.awaiting_appointment_confirmation = False
+			session.latest_analysis = analysis
+			session.save(update_fields=['awaiting_appointment_confirmation', 'latest_analysis', 'updated_at'])
+
+			bot_metadata = {
+				'response_type': assistant_payload.get('response_type'),
+				'booking_auth_required': assistant_payload.get('booking_auth_required', False),
+			}
+			if analysis:
+				bot_metadata['analysis'] = analysis
+
+			bot_message = ChatbotMessage.objects.create(
+				session=session,
+				sender=ChatbotMessage.Sender.BOT,
+				content=assistant_payload.get('reply', ''),
+				metadata=bot_metadata,
+			)
+
+			return Response(
+				{
+					'patient_message': ChatbotMessageSerializer(patient_message).data,
+					'bot_message': ChatbotMessageSerializer(bot_message).data,
+					'analysis': analysis,
+					'session': ChatbotSessionSerializer(session).data,
+				},
+				status=status.HTTP_201_CREATED,
+			)
+
+		analysis = assistant_payload.get('analysis') or analyze_symptoms(
 			patient_content,
 			wants_appointment=True,
 		)
+		bot_reply = (assistant_payload.get('reply') or '').strip()
 
 		recommendation = analysis.get('recommended_appointment', {})
 		if recommendation.get('should_schedule'):
 			recommended_keywords = analysis.get('department_matching_keywords', [])
 			recommendation['candidate_doctors'] = self._list_candidate_doctors(recommended_keywords)
 
-		predictions = analysis.get('probable_diseases', [])
-		prediction_names = ', '.join(item['disease'] for item in predictions[:3]) or 'No strong match'
-		urgency = analysis.get('urgency_level', 'low')
-		department = analysis.get('department', 'General Medicine')
-
-		bot_reply_parts = [
-			f"Possible conditions: {prediction_names}.",
-			f"Urgency level: {urgency}.",
-			f"Recommended department: {department}.",
-		]
-
 		if analysis.get('probable_diseases'):
 			session.awaiting_appointment_confirmation = True
 			session.latest_analysis = analysis
 			session.save(update_fields=['awaiting_appointment_confirmation', 'latest_analysis', 'updated_at'])
-
-			window = recommendation.get('suggested_window', 'as soon as possible')
-			when = recommendation.get('suggested_datetime_label')
-			bot_reply_parts.append(
-				(
-					f"Based on this diagnosis, I can book your appointment {window} (suggested time: {when}). "
-					"Do you want me to book it now? Please reply with yes or no."
-				)
+			confirmation_prompt = (
+				'\n\nBooking confirmation:\n'
+				'- I can book this appointment now.\n'
+				'- Reply with yes to confirm or no to continue without booking.'
 			)
+			bot_reply = f'{bot_reply}{confirmation_prompt}' if bot_reply else confirmation_prompt.strip()
 		else:
 			session.awaiting_appointment_confirmation = False
 			session.latest_analysis = analysis
 			session.save(update_fields=['awaiting_appointment_confirmation', 'latest_analysis', 'updated_at'])
-			bot_reply_parts.append(
-				"I need more specific symptoms to propose a diagnosis and appointment booking."
-			)
-
-		bot_reply_parts.append(analysis.get('summary', ''))
-		bot_reply = ' '.join(part for part in bot_reply_parts if part)
+			if not bot_reply:
+				bot_reply = 'I need more specific symptoms to propose a diagnosis and appointment booking.'
 
 		bot_message = ChatbotMessage.objects.create(
 			session=session,

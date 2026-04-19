@@ -10,15 +10,30 @@ from django.utils import timezone
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATASET_ROOT = PROJECT_ROOT / 'datasets' / 'Dataset1'
-TRAINING_FILE = DATASET_ROOT / 'Training.csv'
-SEVERITY_FILE = DATASET_ROOT / 'symptom_severity.csv'
-DESCRIPTION_FILE = DATASET_ROOT / 'disease_description.csv'
-PRECAUTION_FILE = DATASET_ROOT / 'disease_precaution.csv'
+
+DATASET1_ROOT = PROJECT_ROOT / 'datasets' / 'Dataset1'
+DATASET2_ROOT = PROJECT_ROOT / 'datasets' / 'Dataset2'
+DATASET3_ROOT = PROJECT_ROOT / 'datasets' / 'Dataset3'
+
+TRAINING_FILES = [
+    DATASET1_ROOT / 'Training.csv',
+    DATASET2_ROOT / 'Training.csv',
+    DATASET3_ROOT / 'training_data.csv',
+]
+
+SEVERITY_FILE = DATASET1_ROOT / 'symptom_severity.csv'
+DESCRIPTION_FILE = DATASET1_ROOT / 'disease_description.csv'
+PRECAUTION_FILE = DATASET1_ROOT / 'disease_precaution.csv'
+DISEASE_SYMPTOMS_FILE = DATASET3_ROOT / 'Diseases_Symptoms.csv'
 
 DEFAULT_SUMMARY = (
     'Preliminary AI triage only. This is not a confirmed diagnosis. '
     'Please consult a licensed clinician, especially if symptoms worsen.'
+)
+
+OUT_OF_SCOPE_REPLY = (
+    'I am a healthcare triage chatbot and can only help with health-related symptoms, '
+    'medical orientation, and basic care guidance. Please keep your question within this medical scope.'
 )
 
 APPOINTMENT_INTENT_TERMS = {
@@ -36,6 +51,66 @@ APPOINTMENT_INTENT_TERMS = {
     'agendar',
     'agendar cita',
     'reservar cita',
+    'reserve',
+    'reservation',
+}
+
+GREETING_TERMS = {
+    'hello',
+    'hi',
+    'hey',
+    'good morning',
+    'good afternoon',
+    'good evening',
+    'bonjour',
+    'salut',
+    'hola',
+    'buenas',
+}
+
+THANKS_TERMS = {
+    'thanks',
+    'thank you',
+    'thx',
+    'merci',
+    'gracias',
+}
+
+HEALTH_DOMAIN_HINTS = {
+    'symptom',
+    'symptoms',
+    'health',
+    'medical',
+    'doctor',
+    'hospital',
+    'diagnosis',
+    'disease',
+    'pain',
+    'fever',
+    'cough',
+    'nausea',
+    'vomit',
+    'breathing',
+    'chest',
+    'headache',
+    'rash',
+    'infection',
+    'blood pressure',
+    'diabetes',
+    'urgence',
+    'medicale',
+    'sante',
+    'symptome',
+    'douleur',
+    'fievre',
+    'toux',
+    'hopital',
+    'consulta',
+    'salud',
+    'sintoma',
+    'dolor',
+    'fiebre',
+    'tos',
 }
 
 RED_FLAG_SYMPTOMS = {
@@ -193,13 +268,39 @@ def _is_positive(raw_value):
     return str(raw_value).strip().lower() in {'1', '1.0', 'true', 'yes'}
 
 
+def _split_csv_values(raw_value):
+    if not raw_value:
+        return []
+    values = [part.strip() for part in re.split(r'[,;|]', str(raw_value))]
+    return [value for value in values if value and value.lower() != 'null']
+
+
+def _contains_any_term(normalized_text, terms):
+    if not normalized_text:
+        return False
+    padded_text = f' {normalized_text} '
+    for term in terms:
+        normalized_term = _normalize_text(term)
+        if not normalized_term:
+            continue
+        if f' {normalized_term} ' in padded_text:
+            return True
+    return False
+
+
 @lru_cache(maxsize=1)
 def _load_knowledge_base():
     severity_map = _load_severity_map()
     disease_descriptions = _load_disease_descriptions()
     disease_precautions = _load_disease_precautions()
     training_profiles, symptoms = _load_training_profiles()
-    alias_map = _build_symptom_alias_map(symptoms)
+    disease_catalog = _load_dataset3_disease_catalog()
+    alias_map = _build_symptom_alias_map(symptoms, disease_catalog)
+    known_disease_terms = _collect_known_disease_terms(
+        training_profiles=training_profiles,
+        disease_descriptions=disease_descriptions,
+        disease_catalog=disease_catalog,
+    )
 
     return {
         'severity_map': severity_map,
@@ -208,43 +309,53 @@ def _load_knowledge_base():
         'training_profiles': training_profiles,
         'symptoms': symptoms,
         'alias_map': alias_map,
+        'disease_catalog': disease_catalog,
+        'known_disease_terms': known_disease_terms,
     }
 
 
 def _load_training_profiles():
-    if not TRAINING_FILE.exists():
-        return {}, set()
-
     disease_counts = Counter()
     symptom_counts_by_disease = defaultdict(Counter)
     symptoms = set()
 
-    with TRAINING_FILE.open('r', encoding='utf-8', newline='') as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames or []
-        symptom_columns = [
-            column
-            for column in fieldnames
-            if _normalize_symptom(column) not in {'prognosis', 'disease'}
-        ]
+    for training_file in TRAINING_FILES:
+        if not training_file.exists():
+            continue
 
-        for raw_column in symptom_columns:
-            normalized_column = _normalize_symptom(raw_column)
-            if normalized_column:
-                symptoms.add(normalized_column)
+        with training_file.open('r', encoding='utf-8', newline='') as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = [column for column in (reader.fieldnames or []) if column]
+            symptom_columns = []
+            disease_columns = []
 
-        for row in reader:
-            disease_name = (row.get('prognosis') or row.get('disease') or '').strip()
-            if not disease_name:
-                continue
-
-            disease_counts[disease_name] += 1
-            for raw_column in symptom_columns:
-                normalized_column = _normalize_symptom(raw_column)
+            for column in fieldnames:
+                normalized_column = _normalize_symptom(column)
+                if normalized_column in {'prognosis', 'disease'}:
+                    disease_columns.append(column)
+                    continue
                 if not normalized_column:
                     continue
-                if _is_positive(row.get(raw_column)):
-                    symptom_counts_by_disease[disease_name][normalized_column] += 1
+                symptom_columns.append(column)
+                symptoms.add(normalized_column)
+
+            for row in reader:
+                disease_name = ''
+                for disease_column in disease_columns:
+                    disease_name = (row.get(disease_column) or '').strip().strip(',')
+                    if disease_name:
+                        break
+                if not disease_name:
+                    continue
+
+                disease_counts[disease_name] += 1
+
+                for raw_column in symptom_columns:
+                    normalized_column = _normalize_symptom(raw_column)
+                    if not normalized_column:
+                        continue
+                    if _is_positive(row.get(raw_column)):
+                        symptom_counts_by_disease[disease_name][normalized_column] += 1
 
     disease_profiles = {}
     for disease_name, counts in symptom_counts_by_disease.items():
@@ -305,7 +416,12 @@ def _load_disease_precautions():
                 continue
 
             precautions = []
-            for column in ('Symptom_precaution_0', 'Symptom_precaution_1', 'Symptom_precaution_2', 'Symptom_precaution_3'):
+            for column in (
+                'Symptom_precaution_0',
+                'Symptom_precaution_1',
+                'Symptom_precaution_2',
+                'Symptom_precaution_3',
+            ):
                 value = (row.get(column) or '').strip()
                 if value and value.lower() != 'null':
                     precautions.append(value)
@@ -315,6 +431,52 @@ def _load_disease_precautions():
     return disease_precautions
 
 
+def _load_dataset3_disease_catalog():
+    if not DISEASE_SYMPTOMS_FILE.exists():
+        return {}
+
+    catalog = {}
+    with DISEASE_SYMPTOMS_FILE.open('r', encoding='utf-8', newline='') as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            disease_name = (row.get('Name') or row.get('Disease') or '').strip()
+            disease_key = _normalize_disease_key(disease_name)
+            if not disease_key:
+                continue
+
+            symptoms = _split_csv_values(row.get('Symptoms', ''))
+            treatments = _split_csv_values(row.get('Treatments', ''))
+            code = (row.get('Code') or '').strip()
+
+            catalog[disease_key] = {
+                'name': disease_name,
+                'symptoms': symptoms,
+                'treatments': treatments,
+                'code': code,
+            }
+
+    return catalog
+
+
+def _collect_known_disease_terms(training_profiles, disease_descriptions, disease_catalog):
+    terms = {}
+
+    for disease_name in training_profiles.keys():
+        key = _normalize_disease_key(disease_name)
+        if key:
+            terms[key] = disease_name
+
+    for disease_key in disease_descriptions.keys():
+        if disease_key and disease_key not in terms:
+            terms[disease_key] = disease_key.replace('_', ' ').title()
+
+    for disease_key, payload in disease_catalog.items():
+        if disease_key:
+            terms[disease_key] = payload.get('name') or terms.get(disease_key) or disease_key.replace('_', ' ').title()
+
+    return terms
+
+
 def _resolve_first_existing(candidates, known_symptoms):
     for candidate in candidates:
         if candidate in known_symptoms:
@@ -322,7 +484,32 @@ def _resolve_first_existing(candidates, known_symptoms):
     return None
 
 
-def _build_symptom_alias_map(known_symptoms):
+def _best_known_symptom_for_phrase(phrase, known_symptoms):
+    phrase_tokens = set(_normalize_text(phrase).split())
+    if not phrase_tokens:
+        return None
+
+    best_symptom = None
+    best_score = 0.0
+    for symptom in known_symptoms:
+        symptom_tokens = set(symptom.replace('_', ' ').split())
+        if not symptom_tokens:
+            continue
+        overlap = len(phrase_tokens & symptom_tokens)
+        union = len(phrase_tokens | symptom_tokens)
+        if union == 0:
+            continue
+        score = overlap / union
+        if score > best_score:
+            best_score = score
+            best_symptom = symptom
+
+    if best_score >= 0.5:
+        return best_symptom
+    return None
+
+
+def _build_symptom_alias_map(known_symptoms, disease_catalog):
     alias_map = {}
 
     for symptom in known_symptoms:
@@ -334,6 +521,21 @@ def _build_symptom_alias_map(known_symptoms):
         target = _resolve_first_existing(candidates, known_symptoms)
         if normalized_alias and target:
             alias_map[normalized_alias] = target
+
+    for payload in disease_catalog.values():
+        for symptom_phrase in payload.get('symptoms', []):
+            normalized_alias = _normalize_text(symptom_phrase)
+            if not normalized_alias or normalized_alias in alias_map:
+                continue
+
+            direct_symptom = _normalize_symptom(symptom_phrase)
+            if direct_symptom in known_symptoms:
+                alias_map[normalized_alias] = direct_symptom
+                continue
+
+            candidate = _best_known_symptom_for_phrase(symptom_phrase, known_symptoms)
+            if candidate:
+                alias_map[normalized_alias] = candidate
 
     return alias_map
 
@@ -404,7 +606,6 @@ def _detect_appointment_intent(text):
     normalized_text = _normalize_text(text)
     if not normalized_text:
         return False
-
     return any(term in normalized_text for term in APPOINTMENT_INTENT_TERMS)
 
 
@@ -480,10 +681,87 @@ def _build_appointment_recommendation(appointment_requested, urgency_level, depa
     }
 
 
+def _find_condition_mentions(normalized_text, known_disease_terms, max_items=2):
+    if not normalized_text:
+        return []
+
+    padded_text = f' {normalized_text} '
+    mentions = []
+    for disease_key in sorted(known_disease_terms.keys(), key=len, reverse=True):
+        if len(disease_key) < 4:
+            continue
+        token = f' {disease_key} '
+        if token in padded_text:
+            mentions.append(disease_key)
+        if len(mentions) >= max_items:
+            break
+
+    return mentions
+
+
+def _build_condition_information_reply(mentioned_terms, knowledge_base):
+    if not mentioned_terms:
+        return (
+            'I can explain health conditions and run symptom triage. '
+            'Please provide either a condition name or your symptoms.'
+        )
+
+    disease_key = mentioned_terms[0]
+    known_terms = knowledge_base['known_disease_terms']
+    catalog = knowledge_base['disease_catalog']
+    descriptions = knowledge_base['disease_descriptions']
+    precautions = knowledge_base['disease_precautions']
+
+    display_name = catalog.get(disease_key, {}).get('name') or known_terms.get(disease_key) or disease_key.title()
+    description = descriptions.get(disease_key) or 'I do not have a full clinical description for this condition in my local dataset.'
+    treatments = catalog.get(disease_key, {}).get('treatments', [])[:4]
+    safety = precautions.get(disease_key, [])[:3]
+
+    parts = [
+        f'Condition overview: {display_name}.',
+        f'Description: {description}',
+    ]
+
+    if treatments:
+        parts.append(f'Common management options in the dataset: {", ".join(treatments)}.')
+    if safety:
+        parts.append(f'Precaution tips: {", ".join(safety)}.')
+
+    parts.append('If you share your current symptoms, I can perform a triage estimate with urgency and department guidance.')
+    return ' '.join(parts)
+
+
+def _is_greeting_only(normalized_text):
+    if not normalized_text:
+        return False
+    if _contains_any_term(normalized_text, GREETING_TERMS) and len(normalized_text.split()) <= 8:
+        return not _contains_any_term(normalized_text, HEALTH_DOMAIN_HINTS)
+    return False
+
+
+def _is_thanks_message(normalized_text):
+    if not normalized_text:
+        return False
+    return _contains_any_term(normalized_text, THANKS_TERMS) and len(normalized_text.split()) <= 8
+
+
+def _is_health_related_query(normalized_text, detected_symptoms, appointment_requested, known_disease_terms):
+    if detected_symptoms:
+        return True
+    if appointment_requested:
+        return True
+    if _contains_any_term(normalized_text, HEALTH_DOMAIN_HINTS):
+        return True
+    if _find_condition_mentions(normalized_text, known_disease_terms, max_items=1):
+        return True
+    return False
+
+
 def analyze_symptoms(text, wants_appointment=False):
     knowledge_base = _load_knowledge_base()
     alias_map = knowledge_base['alias_map']
     severity_map = knowledge_base['severity_map']
+    disease_catalog = knowledge_base['disease_catalog']
 
     detected_symptoms = _extract_symptoms_from_text(text, alias_map)
     appointment_requested = bool(wants_appointment or _detect_appointment_intent(text))
@@ -504,6 +782,7 @@ def analyze_symptoms(text, wants_appointment=False):
             'appointment_requested': appointment_requested,
             'recommended_appointment': recommendation,
             'precautions': [],
+            'treatment_suggestions': [],
             'summary': (
                 'I could not confidently map your text to known symptom patterns. '
                 'Please provide specific symptoms (for example: fever, cough, chest pain, nausea). '
@@ -518,6 +797,10 @@ def analyze_symptoms(text, wants_appointment=False):
         disease_descriptions=knowledge_base['disease_descriptions'],
     )
 
+    for item in probable_diseases:
+        disease_key = _normalize_disease_key(item['disease'])
+        item['treatment_options'] = disease_catalog.get(disease_key, {}).get('treatments', [])[:4]
+
     urgency_level, severity_score = _compute_urgency(detected_symptoms, text, severity_map)
     primary_disease = probable_diseases[0]['disease'] if probable_diseases else 'Undetermined condition'
     department_info = _resolve_department(primary_disease, detected_symptoms)
@@ -527,7 +810,10 @@ def analyze_symptoms(text, wants_appointment=False):
         department=department_info['department'],
     )
 
-    precautions = knowledge_base['disease_precautions'].get(_normalize_disease_key(primary_disease), [])
+    primary_key = _normalize_disease_key(primary_disease)
+    precautions = knowledge_base['disease_precautions'].get(primary_key, [])
+    treatment_suggestions = disease_catalog.get(primary_key, {}).get('treatments', [])[:4]
+
     summary = (
         f'Most likely condition from current symptom patterns: {primary_disease}. '
         f'Urgency level appears {urgency_level}. '
@@ -545,5 +831,147 @@ def analyze_symptoms(text, wants_appointment=False):
         'appointment_requested': appointment_requested,
         'recommended_appointment': recommendation,
         'precautions': precautions,
+        'treatment_suggestions': treatment_suggestions,
         'summary': summary,
+    }
+
+
+def _build_triage_reply(analysis, booking_auth_required=False):
+    probable = analysis.get('probable_diseases', [])
+    urgency = analysis.get('urgency_level', 'low')
+    department = analysis.get('department', 'General Medicine')
+    detected_symptoms = analysis.get('detected_symptoms', [])[:6]
+    precautions = analysis.get('precautions', [])[:3]
+    treatments = analysis.get('treatment_suggestions', [])[:4]
+    summary = analysis.get('summary', DEFAULT_SUMMARY)
+
+    if not probable:
+        lines = [
+            'Triage summary',
+            '- I need clearer medical symptoms to generate a reliable triage result.',
+            '- Please include symptom type, duration, intensity, and progression.',
+        ]
+        if booking_auth_required and analysis.get('appointment_requested'):
+            lines.append('- To book an appointment, please log in or sign up first.')
+        lines.append(f'Safety note: {summary}')
+        return '\n'.join(lines)
+
+    lines = [
+        'Triage summary',
+        'Most likely conditions:',
+    ]
+    for index, item in enumerate(probable[:3], start=1):
+        lines.append(f"{index}. {item.get('disease', 'Unknown')} ({item.get('score', 0)}% confidence)")
+
+    lines.extend(
+        [
+            f'Urgency level: {urgency}',
+            f'Recommended department: {department}',
+        ]
+    )
+
+    if detected_symptoms:
+        lines.append(f'Detected symptoms: {", ".join(detected_symptoms)}')
+
+    if treatments:
+        lines.append('Common care options (dataset-based):')
+        lines.extend(f'- {treatment}' for treatment in treatments)
+
+    if precautions:
+        lines.append('Precautions:')
+        lines.extend(f'- {precaution}' for precaution in precautions)
+
+    if analysis.get('appointment_requested'):
+        if booking_auth_required:
+            lines.append('Booking: To reserve an appointment, please log in or sign up first.')
+        else:
+            recommendation = analysis.get('recommended_appointment', {})
+            if recommendation.get('should_schedule'):
+                lines.append(
+                    'Booking suggestion: '
+                    f"{recommendation.get('suggested_window')} "
+                    f"(suggested time: {recommendation.get('suggested_datetime_label')})."
+                )
+
+    lines.append(f'Safety note: {summary}')
+    return '\n'.join(line for line in lines if line)
+
+
+def build_health_chat_response(text, wants_appointment=False, require_auth_for_booking=False):
+    normalized_text = _normalize_text(text)
+    if not normalized_text:
+        return {
+            'response_type': 'empty',
+            'reply': (
+                'Please share your health question or symptoms. '
+                'For example: "I have fever, cough, and chest discomfort for 2 days."'
+            ),
+            'analysis': None,
+            'booking_auth_required': False,
+        }
+
+    if _is_thanks_message(normalized_text):
+        return {
+            'response_type': 'gratitude',
+            'reply': 'You are welcome. If you have more health symptoms to review, I am ready to help.',
+            'analysis': None,
+            'booking_auth_required': False,
+        }
+
+    if _is_greeting_only(normalized_text):
+        return {
+            'response_type': 'greeting',
+            'reply': (
+                'Hello. I am your local healthcare triage assistant. '
+                'Describe your symptoms and I will provide urgency, probable conditions, and department guidance.'
+            ),
+            'analysis': None,
+            'booking_auth_required': False,
+        }
+
+    knowledge_base = _load_knowledge_base()
+    appointment_requested = bool(wants_appointment or _detect_appointment_intent(text))
+    detected_symptoms = _extract_symptoms_from_text(text, knowledge_base['alias_map'])
+
+    if not _is_health_related_query(
+        normalized_text=normalized_text,
+        detected_symptoms=detected_symptoms,
+        appointment_requested=appointment_requested,
+        known_disease_terms=knowledge_base['known_disease_terms'],
+    ):
+        return {
+            'response_type': 'out_of_scope',
+            'reply': OUT_OF_SCOPE_REPLY,
+            'analysis': None,
+            'booking_auth_required': False,
+        }
+
+    condition_mentions = _find_condition_mentions(
+        normalized_text=normalized_text,
+        known_disease_terms=knowledge_base['known_disease_terms'],
+        max_items=2,
+    )
+
+    if not detected_symptoms and condition_mentions:
+        booking_auth_required = bool(require_auth_for_booking and appointment_requested)
+        reply = _build_condition_information_reply(condition_mentions, knowledge_base)
+        if booking_auth_required:
+            reply = f'{reply} To reserve an appointment, please log in or sign up first.'
+
+        return {
+            'response_type': 'condition_info',
+            'reply': reply,
+            'analysis': None,
+            'booking_auth_required': booking_auth_required,
+        }
+
+    analysis = analyze_symptoms(text, wants_appointment=appointment_requested)
+    booking_auth_required = bool(require_auth_for_booking and analysis.get('appointment_requested'))
+    reply = _build_triage_reply(analysis, booking_auth_required=booking_auth_required)
+
+    return {
+        'response_type': 'triage',
+        'reply': reply,
+        'analysis': analysis,
+        'booking_auth_required': booking_auth_required,
     }

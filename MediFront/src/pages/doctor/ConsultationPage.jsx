@@ -52,9 +52,10 @@ const INITIAL_FOLLOW_UP_DRAFT = {
 }
 
 const INITIAL_REFERRAL_DRAFT = {
+  is_out_of_specialty: false,
+  out_of_specialty_opinion: '',
+  redirect_to_colleague: true,
   department: '',
-  target_doctor_id: '',
-  scheduled_at: '',
   reason: 'Specialist referral',
   notes: '',
 }
@@ -191,6 +192,10 @@ const extractApiError = (error, fallback) => {
     return String(detail)
   }
 
+  if (error?.message) {
+    return String(error.message)
+  }
+
   if (responseData && typeof responseData === 'object') {
     const firstFieldError = Object.values(responseData)[0]
     if (firstFieldError) {
@@ -216,6 +221,7 @@ function ConsultationPage() {
   const [metricDraft, setMetricDraft] = useState(INITIAL_METRIC_DRAFT)
   const [createdPayload, setCreatedPayload] = useState(null)
   const [hydratedConsultationId, setHydratedConsultationId] = useState(null)
+  const [activeWorkspaceModal, setActiveWorkspaceModal] = useState(null)
 
   const appointmentsQuery = useQuery({ queryKey: ['doctor-consultation-appointments'], queryFn: listAppointments })
 
@@ -266,15 +272,28 @@ function ConsultationPage() {
 
   const referralMutation = useMutation({
     mutationFn: ({ consultationId, payload }) => referFromConsultation(consultationId, payload),
-    onSuccess: () => {
+    onSuccess: (payload) => {
       queryClient.invalidateQueries({ queryKey: ['appointments-today'] })
       queryClient.invalidateQueries({ queryKey: ['appointments-all'] })
-      toast.success('Referral appointment created successfully.')
+      queryClient.invalidateQueries({ queryKey: ['doctor-consultation-by-appointment', selectedAppointmentId] })
+      queryClient.invalidateQueries({ queryKey: ['doctor-consultations'] })
+      if (payload?.redirect_to_colleague && payload?.appointment) {
+        toast.success(
+          payload?.auto_assigned_slot
+            ? 'Referral appointment auto-scheduled based on colleague availability.'
+            : 'Referral appointment created successfully.',
+        )
+      } else {
+        toast.success('Patient informed to request another appointment with the proper specialty.')
+      }
     },
-    onError: (error) => toast.error(extractApiError(error, 'Unable to create referral appointment.')),
+    onError: (error) => toast.error(extractApiError(error, 'Unable to validate out-of-specialty orientation.')),
   })
 
-  const allAppointments = appointmentsQuery.data?.results || appointmentsQuery.data || []
+  const allAppointments = useMemo(
+    () => appointmentsQuery.data?.results || appointmentsQuery.data || [],
+    [appointmentsQuery.data],
+  )
   const appointmentOptions = useMemo(
     () => allAppointments.filter((item) => ['pending', 'confirmed', 'completed'].includes(item.status)),
     [allAppointments],
@@ -298,7 +317,10 @@ function ConsultationPage() {
 
   const medicalRecord = medicalRecordQuery.data || createdPayload?.medical_record || null
 
-  const doctors = doctorsQuery.data?.results || doctorsQuery.data || []
+  const doctors = useMemo(
+    () => doctorsQuery.data?.results || doctorsQuery.data || [],
+    [doctorsQuery.data],
+  )
   const doctorById = useMemo(() => {
     const mapping = {}
     doctors.forEach((doctor) => {
@@ -320,13 +342,6 @@ function ConsultationPage() {
     })
     return Object.entries(unique).map(([value, label]) => ({ value, label }))
   }, [doctors])
-
-  const filteredDoctors = useMemo(() => {
-    if (!referralDraft.department) {
-      return doctors
-    }
-    return doctors.filter((doctor) => doctor.department === referralDraft.department)
-  }, [doctors, referralDraft.department])
 
   const specialtyAssessments = useMemo(() => {
     if (!medicalRecord?.specialty_assessments || !Array.isArray(medicalRecord.specialty_assessments)) {
@@ -433,12 +448,13 @@ function ConsultationPage() {
       }
     }
 
-    if (!selectedAppointmentId) {
+    const parsedAppointmentId = Number(selectedAppointmentId)
+    if (!parsedAppointmentId || Number.isNaN(parsedAppointmentId)) {
       throw new Error('Select an appointment first.')
     }
 
     const payload = await createFromAppointmentMutation.mutateAsync({
-      appointment_id: Number(selectedAppointmentId),
+      appointment_id: parsedAppointmentId,
       diagnosis: (dossierForm.diagnosis || '').trim() || 'Pending diagnosis',
       anamnesis: (dossierForm.anamnesis || '').trim(),
       treatment_plan: (dossierForm.treatment_plan || '').trim(),
@@ -449,6 +465,29 @@ function ConsultationPage() {
       medicalRecordId: payload?.medical_record?.id,
       consultationId: payload?.consultation?.id,
     }
+  }
+
+  const resolveConsultationForOrientation = async () => {
+    if (activeConsultationId) {
+      return {
+        medicalRecordId: activeMedicalRecordId,
+        consultationId: activeConsultationId,
+      }
+    }
+
+    if (selectedAppointmentId) {
+      const refreshed = await consultationsQuery.refetch()
+      const refreshedConsultations = refreshed?.data?.results || refreshed?.data || []
+      const refreshedConsultation = refreshedConsultations[0]
+      if (refreshedConsultation?.id) {
+        return {
+          medicalRecordId: refreshedConsultation.medical_record || null,
+          consultationId: refreshedConsultation.id,
+        }
+      }
+    }
+
+    return ensureRecordPersisted()
   }
 
   const handleSaveDossier = async (event) => {
@@ -511,6 +550,7 @@ function ConsultationPage() {
       queryClient.invalidateQueries({ queryKey: ['doctor-medical-record', ids.medicalRecordId] })
       queryClient.invalidateQueries({ queryKey: ['doctor-medical-records'] })
       toast.success('Medical dossier updated successfully.')
+      setActiveWorkspaceModal(null)
     } catch (error) {
       toast.error(extractApiError(error, 'Unable to save medical dossier.'))
     }
@@ -527,7 +567,6 @@ function ConsultationPage() {
       const existing = Array.isArray(medicalRecord?.specialty_assessments) ? medicalRecord.specialty_assessments : []
 
       const assessment = {
-        id: `assessment-${Date.now()}`,
         created_at: new Date().toISOString(),
         doctor_id: activeConsultation?.doctor || null,
         doctor_email: activeConsultation?.doctor_email || user?.email || 'unknown-doctor',
@@ -548,6 +587,7 @@ function ConsultationPage() {
       setSpecialtyAssessmentDraft(INITIAL_SPECIALTY_ASSESSMENT_DRAFT)
       setSelectedChecklistIds([])
       toast.success('Specialty assessment saved for multidisciplinary review.')
+      setActiveWorkspaceModal(null)
     } catch (error) {
       toast.error(extractApiError(error, 'Unable to save specialty assessment.'))
     }
@@ -573,7 +613,6 @@ function ConsultationPage() {
       const existing = Array.isArray(medicalRecord?.longitudinal_metrics) ? medicalRecord.longitudinal_metrics : []
 
       const metricEntry = {
-        id: `metric-${Date.now()}`,
         created_at: new Date().toISOString(),
         doctor_id: activeConsultation?.doctor || null,
         doctor_email: activeConsultation?.doctor_email || user?.email || 'unknown-doctor',
@@ -601,6 +640,7 @@ function ConsultationPage() {
         unit: METRIC_CONFIG[prev.metric_type]?.defaultUnit || '',
       }))
       toast.success('Clinical metric record added.')
+      setActiveWorkspaceModal(null)
     } catch (error) {
       toast.error(extractApiError(error, 'Unable to add metric record.'))
     }
@@ -633,51 +673,70 @@ function ConsultationPage() {
         },
       },
       {
-        onSuccess: () => setFollowUpDraft(INITIAL_FOLLOW_UP_DRAFT),
+        onSuccess: () => {
+          setFollowUpDraft(INITIAL_FOLLOW_UP_DRAFT)
+          setActiveWorkspaceModal(null)
+        },
       },
     )
   }
 
-  const handleReferral = () => {
-    if (!activeConsultationId) {
-      toast.error('Save the consultation first before creating a referral.')
+  const handleReferral = async () => {
+    if (!selectedAppointmentId) {
+      toast.error('Select an appointment first before creating orientation.')
       return
     }
 
-    if (!referralDraft.target_doctor_id) {
-      toast.error('Select the target doctor for referral.')
-      return
-    }
-    if (!referralDraft.scheduled_at) {
-      toast.error('Select referral date and time.')
+    if (!referralDraft.is_out_of_specialty) {
+      toast.error('Please confirm that this case is outside your specialty.')
       return
     }
 
-    const normalizedScheduledAt = normalizeDateTimeLocalToIso(referralDraft.scheduled_at)
-    if (!normalizedScheduledAt) {
-      toast.error('Invalid referral date and time.')
+    const opinion = (referralDraft.out_of_specialty_opinion || '').trim()
+    if (!opinion) {
+      toast.error('Please provide your specialty opinion before validation.')
       return
     }
 
     const payload = {
-      target_doctor_id: Number(referralDraft.target_doctor_id),
-      scheduled_at: normalizedScheduledAt,
+      is_out_of_specialty: true,
+      out_of_specialty_opinion: opinion,
+      redirect_to_colleague: Boolean(referralDraft.redirect_to_colleague),
       reason: (referralDraft.reason || '').trim() || 'Referral consultation',
       notes: (referralDraft.notes || '').trim(),
     }
-    if (referralDraft.department) {
+
+    if (referralDraft.redirect_to_colleague) {
+      if (!referralDraft.department) {
+        toast.error('Select the target department for automatic referral scheduling.')
+        return
+      }
       payload.department = referralDraft.department
     }
 
-    referralMutation.mutate(
-      {
-        consultationId: activeConsultationId,
-        payload,
-      },
-      {
-        onSuccess: () => setReferralDraft(INITIAL_REFERRAL_DRAFT),
-      },
-    )
+    try {
+      const ids = await resolveConsultationForOrientation()
+      if (!ids?.consultationId) {
+        throw new Error('Unable to resolve consultation for this appointment.')
+      }
+
+      referralMutation.mutate(
+        {
+          consultationId: ids.consultationId,
+          payload,
+        },
+        {
+          onSuccess: () => {
+            setReferralDraft(INITIAL_REFERRAL_DRAFT)
+            setActiveWorkspaceModal(null)
+          },
+        },
+      )
+    } catch (error) {
+      if (!error?.response) {
+        toast.error(extractApiError(error, 'Unable to prepare consultation orientation.'))
+      }
+    }
   }
 
   return (
@@ -717,6 +776,14 @@ function ConsultationPage() {
             <p>
               Patient: <strong>{selectedAppointment.patient_email}</strong>
             </p>
+            {selectedAppointment.patient_email ? (
+              <Link
+                to={`/doctor/messages?contact=${encodeURIComponent(selectedAppointment.patient_email)}`}
+                className="ghost-btn inline-action"
+              >
+                Contact this patient
+              </Link>
+            ) : null}
             <p>
               Scheduled at: <strong>{new Date(selectedAppointment.scheduled_at).toLocaleString()}</strong>
             </p>
@@ -728,170 +795,81 @@ function ConsultationPage() {
         ) : null}
       </section>
 
-      <section className="card">
+      <section className="card doctor-workspace-menu">
         <div className="inline-header">
-          <h3>Medical dossier form</h3>
-          <span className="chip">Professional Clinical Layout</span>
+          <h3>Clinical action menu</h3>
+          <span className="chip">Focused popup forms</span>
         </div>
-
-        <div className="split-grid">
-          <div className="timeline-item">
-            <h4>Diagnostic synthesis</h4>
-            <div className="form-grid">
-              <label>
-                Diagnosis
-                <textarea
-                  value={dossierForm.diagnosis}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, diagnosis: event.target.value }))}
-                  placeholder="Final doctor diagnosis"
-                  required
-                />
-              </label>
-              <label>
-                Anamnesis
-                <textarea
-                  value={dossierForm.anamnesis}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, anamnesis: event.target.value }))}
-                  placeholder="Current illness history"
-                />
-              </label>
-              <label>
-                Treatment plan
-                <textarea
-                  value={dossierForm.treatment_plan}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, treatment_plan: event.target.value }))}
-                  placeholder="Treatment and management"
-                />
-              </label>
-              <label>
-                Clinical examination
-                <textarea
-                  value={dossierForm.clinical_examination}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, clinical_examination: event.target.value }))}
-                  placeholder="Clinical findings"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={handleSaveDossier}
-                disabled={
-                  createFromAppointmentMutation.isPending ||
-                  updateConsultationMutation.isPending ||
-                  updateRecordMutation.isPending
-                }
-              >
-                {createFromAppointmentMutation.isPending || updateConsultationMutation.isPending || updateRecordMutation.isPending
-                  ? 'Saving dossier...'
-                  : 'Save dossier updates'}
-              </button>
-            </div>
-          </div>
-
-          <div className="timeline-item">
-            <h4>Continuity and risk documentation</h4>
-            <div className="form-grid">
-              <label>
-                Consultation motive
-                <textarea
-                  value={dossierForm.consultation_motive}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, consultation_motive: event.target.value }))}
-                  placeholder="Main reason for this consultation"
-                />
-              </label>
-              <label>
-                Chronic conditions
-                <textarea
-                  value={dossierForm.chronic_conditions}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, chronic_conditions: event.target.value }))}
-                  placeholder="Known chronic diseases"
-                />
-              </label>
-              <label>
-                Family history
-                <textarea
-                  value={dossierForm.family_history}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, family_history: event.target.value }))}
-                  placeholder="Relevant family history"
-                />
-              </label>
-              <label>
-                Follow-up plan notes
-                <textarea
-                  value={dossierForm.follow_up_plan}
-                  onChange={(event) => setDossierForm((prev) => ({ ...prev, follow_up_plan: event.target.value }))}
-                  placeholder="Planned follow-up strategy"
-                />
-              </label>
-            </div>
-          </div>
+        <p className="muted">
+          This page now stays clean: choose an action below, complete the requested form in a popup, then return to the dossier overview.
+        </p>
+        <div className="doctor-workspace-menu-grid">
+          <button
+            type="button"
+            className="doctor-workspace-menu-btn"
+            onClick={() => setActiveWorkspaceModal('dossier')}
+            disabled={!selectedAppointmentId}
+          >
+            Update medical dossier
+          </button>
+          <button
+            type="button"
+            className="doctor-workspace-menu-btn"
+            onClick={() => setActiveWorkspaceModal('specialty')}
+            disabled={!selectedAppointmentId}
+          >
+            Add specialty assessment
+          </button>
+          <button
+            type="button"
+            className="doctor-workspace-menu-btn"
+            onClick={() => setActiveWorkspaceModal('metrics')}
+            disabled={!selectedAppointmentId}
+          >
+            Add longitudinal metric
+          </button>
+          <button
+            type="button"
+            className="doctor-workspace-menu-btn"
+            onClick={() => setActiveWorkspaceModal('followup')}
+            disabled={!activeConsultationId}
+          >
+            Schedule follow-up
+          </button>
+          <button
+            type="button"
+            className="doctor-workspace-menu-btn"
+            onClick={() => setActiveWorkspaceModal('referral')}
+            disabled={!selectedAppointmentId}
+          >
+            Validate referral/orientation
+          </button>
         </div>
       </section>
 
       <section className="card split-grid">
         <article className="timeline-item">
           <div className="inline-header">
-            <h3>Specialty assessment</h3>
-            <span className="status-tag confirmed">{currentDoctorProfile?.department_label || currentDepartment}</span>
-          </div>
-          <p className="muted">
-            Checklist adapts to current specialty. Each saved opinion remains visible for next specialists.
-          </p>
-
-          <div className="timeline">
-            {checklistOptions.map((item) => (
-              <label key={item.id} className="timeline-item read" style={{ opacity: 1 }}>
-                <input
-                  type="checkbox"
-                  checked={selectedChecklistIds.includes(item.id)}
-                  onChange={(event) => {
-                    if (event.target.checked) {
-                      setSelectedChecklistIds((prev) => [...prev, item.id])
-                    } else {
-                      setSelectedChecklistIds((prev) => prev.filter((id) => id !== item.id))
-                    }
-                  }}
-                />
-                <span>{item.label}</span>
-              </label>
-            ))}
-          </div>
-
-          <div className="form-grid">
-            <label>
-              Confidence level
-              <select
-                value={specialtyAssessmentDraft.confidence_level}
-                onChange={(event) =>
-                  setSpecialtyAssessmentDraft((prev) => ({ ...prev, confidence_level: event.target.value }))
-                }
-              >
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-              </select>
-            </label>
-            <label>
-              Specialist opinion
-              <textarea
-                value={specialtyAssessmentDraft.opinion}
-                onChange={(event) =>
-                  setSpecialtyAssessmentDraft((prev) => ({ ...prev, opinion: event.target.value }))
-                }
-                placeholder="Professional opinion for multidisciplinary continuity"
-              />
-            </label>
-            <button
-              type="button"
-              onClick={handleSaveSpecialtyAssessment}
-              disabled={updateRecordMutation.isPending || createFromAppointmentMutation.isPending}
-            >
-              Save specialty assessment
+            <h3>Medical dossier snapshot</h3>
+            <button type="button" className="ghost-btn inline-action" onClick={() => setActiveWorkspaceModal('dossier')}>
+              Edit dossier
             </button>
           </div>
+          <p>
+            Diagnosis: <strong>{dossierForm.diagnosis || activeConsultation?.diagnosis || 'Not documented yet'}</strong>
+          </p>
+          <p className="muted">Anamnesis: {dossierForm.anamnesis || activeConsultation?.anamnesis || 'Not documented yet'}</p>
+          <p className="muted">Treatment plan: {dossierForm.treatment_plan || activeConsultation?.treatment_plan || 'Not documented yet'}</p>
+          <p className="muted">Follow-up notes: {dossierForm.follow_up_plan || 'No follow-up note yet'}</p>
         </article>
 
         <article className="timeline-item">
-          <h3>Multidisciplinary trail</h3>
+          <div className="inline-header">
+            <h3>Multidisciplinary trail</h3>
+            <button type="button" className="ghost-btn inline-action" onClick={() => setActiveWorkspaceModal('specialty')}>
+              New assessment
+            </button>
+          </div>
           {specialtyAssessments.length === 0 ? <p className="muted">No specialist assessments yet.</p> : null}
           <div className="timeline">
             {specialtyAssessments.map((assessment) => (
@@ -917,114 +895,15 @@ function ConsultationPage() {
 
       <section className="card split-grid">
         <article className="timeline-item">
-          <h3>Longitudinal clinical records</h3>
-          <p className="muted">
-            Add non-contiguous period records (hypertension, diabetes, HbA1c, weight, custom) to build trend visibility.
-          </p>
-
-          <div className="form-grid">
-            <label>
-              Metric type
-              <select
-                value={metricDraft.metric_type}
-                onChange={(event) => {
-                  const nextType = event.target.value
-                  setMetricDraft((prev) => ({
-                    ...prev,
-                    metric_type: nextType,
-                    unit: METRIC_CONFIG[nextType]?.defaultUnit || '',
-                    value_secondary: nextType === 'blood_pressure' ? prev.value_secondary : '',
-                  }))
-                }}
-              >
-                {Object.entries(METRIC_CONFIG).map(([value, config]) => (
-                  <option key={value} value={value}>
-                    {config.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Recorded at
-              <input
-                type="datetime-local"
-                step={1800}
-                value={metricDraft.recorded_at}
-                onChange={(event) =>
-                  setMetricDraft((prev) => ({
-                    ...prev,
-                    recorded_at: normalizeDateTimeLocalToSlot(event.target.value),
-                  }))
-                }
-              />
-            </label>
-
-            <label>
-              Period start
-              <input
-                type="date"
-                value={metricDraft.period_start}
-                onChange={(event) => setMetricDraft((prev) => ({ ...prev, period_start: event.target.value }))}
-              />
-            </label>
-
-            <label>
-              Period end
-              <input
-                type="date"
-                value={metricDraft.period_end}
-                onChange={(event) => setMetricDraft((prev) => ({ ...prev, period_end: event.target.value }))}
-              />
-            </label>
-
-            <label>
-              {METRIC_CONFIG[metricDraft.metric_type]?.primaryLabel || 'Primary value'}
-              <input
-                type="number"
-                step="0.01"
-                value={metricDraft.value_primary}
-                onChange={(event) => setMetricDraft((prev) => ({ ...prev, value_primary: event.target.value }))}
-              />
-            </label>
-
-            <label>
-              {METRIC_CONFIG[metricDraft.metric_type]?.secondaryLabel || 'Secondary value'}
-              <input
-                type="number"
-                step="0.01"
-                value={metricDraft.value_secondary}
-                onChange={(event) => setMetricDraft((prev) => ({ ...prev, value_secondary: event.target.value }))}
-                disabled={metricDraft.metric_type !== 'blood_pressure'}
-              />
-            </label>
-
-            <label>
-              Unit
-              <input
-                value={metricDraft.unit}
-                onChange={(event) => setMetricDraft((prev) => ({ ...prev, unit: event.target.value }))}
-                placeholder="Unit"
-              />
-            </label>
-
-            <label>
-              Notes
-              <textarea
-                value={metricDraft.notes}
-                onChange={(event) => setMetricDraft((prev) => ({ ...prev, notes: event.target.value }))}
-                placeholder="Clinical context for this metric"
-              />
-            </label>
-
-            <button
-              type="button"
-              onClick={handleAddMetricRecord}
-              disabled={updateRecordMutation.isPending || createFromAppointmentMutation.isPending}
-            >
-              Add metric record
+          <div className="inline-header">
+            <h3>Longitudinal clinical records</h3>
+            <button type="button" className="ghost-btn inline-action" onClick={() => setActiveWorkspaceModal('metrics')}>
+              Add metric
             </button>
           </div>
+          <p className="muted">
+            Non-contiguous records are saved chronologically for blood pressure, glucose, HbA1c, weight, and custom metrics.
+          </p>
 
           {longitudinalMetrics.length > 0 ? (
             <div className="timeline">
@@ -1050,11 +929,24 @@ function ConsultationPage() {
                 </div>
               ))}
             </div>
-          ) : null}
+          ) : (
+            <p className="muted">No metric record yet. Use "Add metric" to register the first data point.</p>
+          )}
         </article>
 
         <article className="timeline-item">
-          <h3>Visual analytics</h3>
+          <div className="inline-header">
+            <h3>Visual analytics</h3>
+            <div className="doctor-inline-actions">
+              <button type="button" className="ghost-btn inline-action" onClick={() => setActiveWorkspaceModal('followup')}>
+                Follow-up
+              </button>
+              <button type="button" className="ghost-btn inline-action" onClick={() => setActiveWorkspaceModal('referral')}>
+                Referral
+              </button>
+            </div>
+          </div>
+
           {bloodPressureChartData.length > 0 ? (
             <div className="timeline-item" style={{ opacity: 1 }}>
               <h4>Hypertension trend</h4>
@@ -1094,139 +986,454 @@ function ConsultationPage() {
         </article>
       </section>
 
-      <section className="card split-grid doctor-dashboard-actions">
-        <article className="timeline-item">
-          <h3>Schedule another appointment</h3>
-          <p className="muted">Create a follow-up appointment for this patient from the same consultation.</p>
+      {activeWorkspaceModal ? (
+        <div
+          className="doctor-form-modal-overlay"
+          role="presentation"
+          onClick={() => setActiveWorkspaceModal(null)}
+        >
+          <section
+            className="card doctor-form-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Consultation workspace form"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="inline-header">
+              <h3>
+                {activeWorkspaceModal === 'dossier'
+                  ? 'Medical dossier form'
+                  : activeWorkspaceModal === 'specialty'
+                    ? 'Specialty assessment form'
+                    : activeWorkspaceModal === 'metrics'
+                      ? 'Longitudinal metric form'
+                      : activeWorkspaceModal === 'followup'
+                        ? 'Follow-up planning form'
+                        : 'Referral / orientation form'}
+              </h3>
+              <button type="button" className="ghost-btn inline-action" onClick={() => setActiveWorkspaceModal(null)}>
+                Close
+              </button>
+            </div>
 
-          <div className="form-grid">
-            <label>
-              Follow-up date and time
-              <input
-                type="datetime-local"
-                step={1800}
-                value={followUpDraft.scheduled_at}
-                onChange={(event) =>
-                  setFollowUpDraft((prev) => ({
-                    ...prev,
-                    scheduled_at: normalizeDateTimeLocalToSlot(event.target.value),
-                  }))
-                }
-              />
-            </label>
+            {activeWorkspaceModal === 'dossier' ? (
+              <div className="split-grid">
+                <div className="timeline-item">
+                  <h4>Diagnostic synthesis</h4>
+                  <div className="form-grid">
+                    <label>
+                      Diagnosis
+                      <textarea
+                        value={dossierForm.diagnosis}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, diagnosis: event.target.value }))}
+                        placeholder="Final doctor diagnosis"
+                        required
+                      />
+                    </label>
+                    <label>
+                      Anamnesis
+                      <textarea
+                        value={dossierForm.anamnesis}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, anamnesis: event.target.value }))}
+                        placeholder="Current illness history"
+                      />
+                    </label>
+                    <label>
+                      Treatment plan
+                      <textarea
+                        value={dossierForm.treatment_plan}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, treatment_plan: event.target.value }))}
+                        placeholder="Treatment and management"
+                      />
+                    </label>
+                    <label>
+                      Clinical examination
+                      <textarea
+                        value={dossierForm.clinical_examination}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, clinical_examination: event.target.value }))}
+                        placeholder="Clinical findings"
+                      />
+                    </label>
+                  </div>
+                </div>
 
-            <label>
-              Reason
-              <input
-                value={followUpDraft.reason}
-                onChange={(event) => setFollowUpDraft((prev) => ({ ...prev, reason: event.target.value }))}
-                placeholder="Follow-up reason"
-              />
-            </label>
+                <div className="timeline-item">
+                  <h4>Continuity and risk documentation</h4>
+                  <div className="form-grid">
+                    <label>
+                      Consultation motive
+                      <textarea
+                        value={dossierForm.consultation_motive}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, consultation_motive: event.target.value }))}
+                        placeholder="Main reason for this consultation"
+                      />
+                    </label>
+                    <label>
+                      Chronic conditions
+                      <textarea
+                        value={dossierForm.chronic_conditions}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, chronic_conditions: event.target.value }))}
+                        placeholder="Known chronic diseases"
+                      />
+                    </label>
+                    <label>
+                      Family history
+                      <textarea
+                        value={dossierForm.family_history}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, family_history: event.target.value }))}
+                        placeholder="Relevant family history"
+                      />
+                    </label>
+                    <label>
+                      Follow-up plan notes
+                      <textarea
+                        value={dossierForm.follow_up_plan}
+                        onChange={(event) => setDossierForm((prev) => ({ ...prev, follow_up_plan: event.target.value }))}
+                        placeholder="Planned follow-up strategy"
+                      />
+                    </label>
+                  </div>
+                </div>
 
-            <label>
-              Notes
-              <textarea
-                value={followUpDraft.notes}
-                onChange={(event) => setFollowUpDraft((prev) => ({ ...prev, notes: event.target.value }))}
-                placeholder="Follow-up notes"
-              />
-            </label>
+                <button
+                  type="button"
+                  onClick={handleSaveDossier}
+                  disabled={
+                    createFromAppointmentMutation.isPending ||
+                    updateConsultationMutation.isPending ||
+                    updateRecordMutation.isPending
+                  }
+                >
+                  {createFromAppointmentMutation.isPending || updateConsultationMutation.isPending || updateRecordMutation.isPending
+                    ? 'Saving dossier...'
+                    : 'Save dossier updates'}
+                </button>
+              </div>
+            ) : null}
 
-            <button
-              type="button"
-              onClick={handleFollowUp}
-              disabled={scheduleFollowUpMutation.isPending || !activeConsultationId}
-            >
-              Schedule follow-up
-            </button>
-          </div>
-        </article>
+            {activeWorkspaceModal === 'specialty' ? (
+              <div className="form-grid">
+                <p className="muted">
+                  Current specialty context: <strong>{currentDoctorProfile?.department_label || currentDepartment}</strong>
+                </p>
 
-        <article className="timeline-item">
-          <h3>Redirect to another department/doctor</h3>
-          <p className="muted">Use this referral form to send the patient to another specialist.</p>
+                <div className="timeline">
+                  {checklistOptions.map((item) => (
+                    <label key={item.id} className="consultation-checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={selectedChecklistIds.includes(item.id)}
+                        onChange={(event) => {
+                          if (event.target.checked) {
+                            setSelectedChecklistIds((prev) => [...prev, item.id])
+                          } else {
+                            setSelectedChecklistIds((prev) => prev.filter((id) => id !== item.id))
+                          }
+                        }}
+                      />
+                      <span>{item.label}</span>
+                    </label>
+                  ))}
+                </div>
 
-          <div className="form-grid">
-            <label>
-              Department
-              <select
-                value={referralDraft.department}
-                onChange={(event) =>
-                  setReferralDraft((prev) => ({
-                    ...prev,
-                    department: event.target.value,
-                    target_doctor_id: '',
-                  }))
-                }
-              >
-                <option value="">All departments</option>
-                {departments.map((department) => (
-                  <option key={department.value} value={department.value}>
-                    {department.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+                <label>
+                  Confidence level
+                  <select
+                    value={specialtyAssessmentDraft.confidence_level}
+                    onChange={(event) =>
+                      setSpecialtyAssessmentDraft((prev) => ({ ...prev, confidence_level: event.target.value }))
+                    }
+                  >
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </label>
 
-            <label>
-              Target doctor
-              <select
-                value={referralDraft.target_doctor_id}
-                onChange={(event) => setReferralDraft((prev) => ({ ...prev, target_doctor_id: event.target.value }))}
-              >
-                <option value="">Select doctor</option>
-                {filteredDoctors.map((doctor) => (
-                  <option key={doctor.id} value={doctor.id}>
-                    {doctor.user_email} ({doctor.department_label || doctor.department})
-                  </option>
-                ))}
-              </select>
-            </label>
+                <label>
+                  Specialist opinion
+                  <textarea
+                    value={specialtyAssessmentDraft.opinion}
+                    onChange={(event) =>
+                      setSpecialtyAssessmentDraft((prev) => ({ ...prev, opinion: event.target.value }))
+                    }
+                    placeholder="Professional opinion for multidisciplinary continuity"
+                  />
+                </label>
 
-            <label>
-              Referral date and time
-              <input
-                type="datetime-local"
-                step={1800}
-                value={referralDraft.scheduled_at}
-                onChange={(event) =>
-                  setReferralDraft((prev) => ({
-                    ...prev,
-                    scheduled_at: normalizeDateTimeLocalToSlot(event.target.value),
-                  }))
-                }
-              />
-            </label>
+                <button
+                  type="button"
+                  onClick={handleSaveSpecialtyAssessment}
+                  disabled={updateRecordMutation.isPending || createFromAppointmentMutation.isPending}
+                >
+                  Save specialty assessment
+                </button>
+              </div>
+            ) : null}
 
-            <label>
-              Referral reason
-              <input
-                value={referralDraft.reason}
-                onChange={(event) => setReferralDraft((prev) => ({ ...prev, reason: event.target.value }))}
-                placeholder="Referral reason"
-              />
-            </label>
+            {activeWorkspaceModal === 'metrics' ? (
+              <div className="form-grid">
+                <label>
+                  Metric type
+                  <select
+                    value={metricDraft.metric_type}
+                    onChange={(event) => {
+                      const nextType = event.target.value
+                      setMetricDraft((prev) => ({
+                        ...prev,
+                        metric_type: nextType,
+                        unit: METRIC_CONFIG[nextType]?.defaultUnit || '',
+                        value_secondary: nextType === 'blood_pressure' ? prev.value_secondary : '',
+                      }))
+                    }}
+                  >
+                    {Object.entries(METRIC_CONFIG).map(([value, config]) => (
+                      <option key={value} value={value}>
+                        {config.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-            <label>
-              Notes
-              <textarea
-                value={referralDraft.notes}
-                onChange={(event) => setReferralDraft((prev) => ({ ...prev, notes: event.target.value }))}
-                placeholder="Referral notes"
-              />
-            </label>
+                <label>
+                  Recorded at
+                  <input
+                    type="datetime-local"
+                    step={1800}
+                    value={metricDraft.recorded_at}
+                    onChange={(event) =>
+                      setMetricDraft((prev) => ({
+                        ...prev,
+                        recorded_at: normalizeDateTimeLocalToSlot(event.target.value),
+                      }))
+                    }
+                  />
+                </label>
 
-            <button
-              type="button"
-              onClick={handleReferral}
-              disabled={referralMutation.isPending || !activeConsultationId}
-            >
-              Redirect patient
-            </button>
-          </div>
-        </article>
-      </section>
+                <label>
+                  Period start
+                  <input
+                    type="date"
+                    value={metricDraft.period_start}
+                    onChange={(event) => setMetricDraft((prev) => ({ ...prev, period_start: event.target.value }))}
+                  />
+                </label>
+
+                <label>
+                  Period end
+                  <input
+                    type="date"
+                    value={metricDraft.period_end}
+                    onChange={(event) => setMetricDraft((prev) => ({ ...prev, period_end: event.target.value }))}
+                  />
+                </label>
+
+                <label>
+                  {METRIC_CONFIG[metricDraft.metric_type]?.primaryLabel || 'Primary value'}
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={metricDraft.value_primary}
+                    onChange={(event) => setMetricDraft((prev) => ({ ...prev, value_primary: event.target.value }))}
+                  />
+                </label>
+
+                <label>
+                  {METRIC_CONFIG[metricDraft.metric_type]?.secondaryLabel || 'Secondary value'}
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={metricDraft.value_secondary}
+                    onChange={(event) => setMetricDraft((prev) => ({ ...prev, value_secondary: event.target.value }))}
+                    disabled={metricDraft.metric_type !== 'blood_pressure'}
+                  />
+                </label>
+
+                <label>
+                  Unit
+                  <input
+                    value={metricDraft.unit}
+                    onChange={(event) => setMetricDraft((prev) => ({ ...prev, unit: event.target.value }))}
+                    placeholder="Unit"
+                  />
+                </label>
+
+                <label>
+                  Notes
+                  <textarea
+                    value={metricDraft.notes}
+                    onChange={(event) => setMetricDraft((prev) => ({ ...prev, notes: event.target.value }))}
+                    placeholder="Clinical context for this metric"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleAddMetricRecord}
+                  disabled={updateRecordMutation.isPending || createFromAppointmentMutation.isPending}
+                >
+                  Add metric record
+                </button>
+              </div>
+            ) : null}
+
+            {activeWorkspaceModal === 'followup' ? (
+              <div className="form-grid">
+                <label>
+                  Follow-up date and time
+                  <input
+                    type="datetime-local"
+                    step={1800}
+                    value={followUpDraft.scheduled_at}
+                    onChange={(event) =>
+                      setFollowUpDraft((prev) => ({
+                        ...prev,
+                        scheduled_at: normalizeDateTimeLocalToSlot(event.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label>
+                  Reason
+                  <input
+                    value={followUpDraft.reason}
+                    onChange={(event) => setFollowUpDraft((prev) => ({ ...prev, reason: event.target.value }))}
+                    placeholder="Follow-up reason"
+                  />
+                </label>
+
+                <label>
+                  Notes
+                  <textarea
+                    value={followUpDraft.notes}
+                    onChange={(event) => setFollowUpDraft((prev) => ({ ...prev, notes: event.target.value }))}
+                    placeholder="Follow-up notes"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleFollowUp}
+                  disabled={scheduleFollowUpMutation.isPending || !activeConsultationId}
+                >
+                  Schedule follow-up
+                </button>
+              </div>
+            ) : null}
+
+            {activeWorkspaceModal === 'referral' ? (
+              <div className="form-grid">
+                <label className="consultation-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={referralDraft.is_out_of_specialty}
+                    onChange={(event) =>
+                      setReferralDraft((prev) => ({
+                        ...prev,
+                        is_out_of_specialty: event.target.checked,
+                      }))
+                    }
+                  />
+                  <span>This case is outside my current specialty.</span>
+                </label>
+
+                <label>
+                  Doctor opinion (required)
+                  <textarea
+                    value={referralDraft.out_of_specialty_opinion}
+                    onChange={(event) =>
+                      setReferralDraft((prev) => ({
+                        ...prev,
+                        out_of_specialty_opinion: event.target.value,
+                      }))
+                    }
+                    placeholder="Explain why this case should be handled by another specialty"
+                  />
+                </label>
+
+                <label>
+                  Orientation decision
+                  <select
+                    value={referralDraft.redirect_to_colleague ? 'redirect' : 'inform'}
+                    onChange={(event) =>
+                      setReferralDraft((prev) => ({
+                        ...prev,
+                        redirect_to_colleague: event.target.value === 'redirect',
+                      }))
+                    }
+                  >
+                    <option value="redirect">Redirect to colleague (auto-scheduled)</option>
+                    <option value="inform">No redirect, inform patient</option>
+                  </select>
+                </label>
+
+                {referralDraft.redirect_to_colleague ? (
+                  <>
+                    <label>
+                      Department
+                      <select
+                        value={referralDraft.department}
+                        onChange={(event) =>
+                          setReferralDraft((prev) => ({
+                            ...prev,
+                            department: event.target.value,
+                          }))
+                        }
+                      >
+                        <option value="">Select target department</option>
+                        {departments.map((department) => (
+                          <option key={department.value} value={department.value}>
+                            {department.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <p className="muted">
+                      Appointment and colleague are assigned automatically by the system based on selected department availability.
+                    </p>
+                  </>
+                ) : (
+                  <p className="muted">
+                    The patient will be notified to request another appointment with the appropriate specialty.
+                  </p>
+                )}
+
+                <label>
+                  {referralDraft.redirect_to_colleague ? 'Referral reason' : 'Patient guidance title'}
+                  <input
+                    value={referralDraft.reason}
+                    onChange={(event) => setReferralDraft((prev) => ({ ...prev, reason: event.target.value }))}
+                    placeholder={referralDraft.redirect_to_colleague ? 'Referral reason' : 'Guidance note title'}
+                  />
+                </label>
+
+                <label>
+                  {referralDraft.redirect_to_colleague ? 'Referral notes' : 'Guidance notes'}
+                  <textarea
+                    value={referralDraft.notes}
+                    onChange={(event) => setReferralDraft((prev) => ({ ...prev, notes: event.target.value }))}
+                    placeholder={referralDraft.redirect_to_colleague ? 'Referral notes' : 'Additional guidance for patient notification'}
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleReferral}
+                  disabled={referralMutation.isPending || createFromAppointmentMutation.isPending || !selectedAppointmentId}
+                >
+                  {referralMutation.isPending
+                    ? 'Saving orientation...'
+                    : referralDraft.redirect_to_colleague
+                      ? 'Validate and auto-redirect'
+                      : 'Validate and notify patient'}
+                </button>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
     </div>
   )
 }

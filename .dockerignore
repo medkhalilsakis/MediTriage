@@ -1,0 +1,9 @@
+.git/
+.gitignore
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+BackEnd/db.sqlite3
+MediFront/node_modules/
+MediFront/dist/

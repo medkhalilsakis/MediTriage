@@ -8,6 +8,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from doctors.models import DoctorProfile
+from medical_records.operations import ensure_doctor_not_blocked_now
 
 from .models import Appointment, AppointmentAdvanceOffer
 from .scheduling import (
@@ -80,6 +81,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         appointment = self.get_object()
         self._ensure_staff_can_manage_appointment(appointment, request.user)
 
+        if request.user.role == 'doctor':
+            ensure_doctor_not_blocked_now(appointment.doctor, action_label='accept appointments')
+
         appointment.status = Appointment.Status.CONFIRMED
         appointment.last_staff_action_at = timezone.now()
         appointment.notes = self._append_action_note(
@@ -93,6 +97,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     def complete(self, request, pk=None):
         appointment = self.get_object()
         self._ensure_staff_can_manage_appointment(appointment, request.user)
+
+        if request.user.role == 'doctor':
+            ensure_doctor_not_blocked_now(appointment.doctor, action_label='complete appointments')
 
         if appointment.status in [Appointment.Status.CANCELLED, Appointment.Status.NO_SHOW]:
             raise ValidationError({'detail': 'Cancelled or no-show appointments cannot be completed.'})

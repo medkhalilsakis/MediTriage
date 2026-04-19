@@ -4,6 +4,7 @@ from django.db.models import Count
 from django.utils import timezone
 
 from doctors.models import DoctorProfile
+from medical_records.operations import get_doctor_operation_overlap_for_slot
 
 from .models import Appointment, AppointmentAdvanceOffer
 
@@ -74,6 +75,9 @@ def is_doctor_available_for_slot(
     if not doctor:
         return False
 
+    if not doctor.user.is_active:
+        return False
+
     slot = _normalize_for_slot(slot_datetime)
     now_local = _normalize_for_slot(timezone.now())
 
@@ -88,6 +92,13 @@ def is_doctor_available_for_slot(
         return False
 
     if not _is_slot_within_working_windows(doctor, slot):
+        return False
+
+    if get_doctor_operation_overlap_for_slot(
+        doctor=doctor,
+        slot_start=slot,
+        slot_duration_minutes=SLOT_DURATION_MINUTES,
+    ):
         return False
 
     appointment_conflict = Appointment.objects.filter(
@@ -145,7 +156,7 @@ def is_doctor_available_for_slot(
 
 def _get_doctor_candidates(department):
     return list(
-        DoctorProfile.objects.filter(department=department)
+        DoctorProfile.objects.filter(department=department, user__is_active=True)
         .select_related('user')
         .prefetch_related('availability_slots', 'leave_periods')
     )
@@ -169,6 +180,9 @@ def _get_doctor_load_map(doctors, current_time):
 
 
 def _find_first_available_slot(doctor, current_time, exclude_appointment_id=None):
+    if not doctor.user.is_active:
+        return None
+
     now_local = _normalize_for_slot(current_time)
     leave_ranges = _get_leave_ranges(doctor)
 
@@ -220,6 +234,14 @@ def _find_first_available_slot(doctor, current_time, exclude_appointment_id=None
                     continue
 
                 if slot in occupied or slot in reserved_by_offer:
+                    slot += timedelta(minutes=SLOT_DURATION_MINUTES)
+                    continue
+
+                if get_doctor_operation_overlap_for_slot(
+                    doctor=doctor,
+                    slot_start=slot,
+                    slot_duration_minutes=SLOT_DURATION_MINUTES,
+                ):
                     slot += timedelta(minutes=SLOT_DURATION_MINUTES)
                     continue
 

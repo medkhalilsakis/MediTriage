@@ -21,7 +21,14 @@ export const getMyAccount = async () => {
 }
 
 export const updateMyAccount = async (payload) => {
-  const { data } = await axiosInstance.patch('/auth/me/', payload)
+  const isFormData = typeof FormData !== 'undefined' && payload instanceof FormData
+  const { data } = await axiosInstance.patch('/auth/me/', payload, {
+    headers: isFormData
+      ? {
+        'Content-Type': 'multipart/form-data',
+      }
+      : undefined,
+  })
   return data
 }
 

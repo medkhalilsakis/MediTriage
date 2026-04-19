@@ -129,6 +129,7 @@ def redistribute_appointments_for_leave(leave, actor=None):
 
     candidate_doctors = list(
         DoctorProfile.objects.exclude(pk=leave.doctor_id)
+        .filter(user__is_active=True)
         .select_related('user')
         .prefetch_related('availability_slots', 'leave_periods')
     )

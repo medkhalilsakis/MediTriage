@@ -10,7 +10,13 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from appointments.models import Appointment
-from appointments.scheduling import DEFAULT_END_TIME, DEFAULT_START_TIME, is_doctor_available_for_slot, normalize_slot_datetime
+from appointments.scheduling import (
+	DEFAULT_END_TIME,
+	DEFAULT_START_TIME,
+	find_first_available_slot_for_doctor,
+	is_doctor_available_for_slot,
+	normalize_slot_datetime,
+)
 from appointments.serializers import AppointmentSerializer
 from chatbot.models import ChatbotMessage
 from doctors.models import DoctorProfile
@@ -19,9 +25,11 @@ from follow_up.serializers import FollowUpSerializer
 from notifications.models import Notification
 from patients.models import PatientProfile
 
-from .models import Consultation, MedicalDocument, MedicalDocumentRequest, MedicalRecord
+from .models import Consultation, DoctorOperation, MedicalDocument, MedicalDocumentRequest, MedicalRecord
+from .operations import ensure_doctor_not_blocked_now, get_doctor_blocking_operation
 from .serializers import (
 	ConsultationSerializer,
+	DoctorOperationSerializer,
 	MedicalDocumentRequestSerializer,
 	MedicalDocumentSerializer,
 	MedicalRecordSerializer,
@@ -32,6 +40,8 @@ class MedicalRecordViewSet(viewsets.ModelViewSet):
 	serializer_class = MedicalRecordSerializer
 	queryset = MedicalRecord.objects.select_related('patient__user', 'archived_by').prefetch_related(
 		'consultations__doctor__user',
+		'operations__doctor__user',
+		'operations__finished_by',
 		'document_requests__doctor__user',
 		'documents',
 	).all()
@@ -197,6 +207,9 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 		'medical_record__patient__user',
 		'doctor__user',
 		'appointment',
+		'out_of_specialty_validated_by',
+		'redirected_to_doctor__user',
+		'redirected_appointment',
 	).all()
 	filterset_fields = ['medical_record', 'doctor', 'appointment', 'icd10_code']
 	search_fields = ['diagnosis', 'anamnesis', 'icd10_code', 'treatment_plan']
@@ -223,6 +236,7 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 			doctor_profile = DoctorProfile.objects.filter(user=user).first()
 			if not doctor_profile:
 				raise ValidationError({'doctor': 'Doctor profile is missing for this account.'})
+			ensure_doctor_not_blocked_now(doctor_profile, action_label='create consultations')
 		else:
 			doctor_profile = serializer.validated_data.get('doctor')
 			if not doctor_profile:
@@ -259,6 +273,8 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 
 		if appointment.doctor_id != doctor_profile.id:
 			raise PermissionDenied('You can only create records for your own scheduled patients.')
+
+		ensure_doctor_not_blocked_now(doctor_profile, action_label='start patient consultations')
 
 		diagnosis = str(request.data.get('diagnosis', '') or '').strip()
 		if not diagnosis:
@@ -424,98 +440,220 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 		if user.role == 'doctor' and consultation.doctor.user_id != user.id:
 			raise PermissionDenied('Doctors can only create referrals from their own consultations.')
 
-		target_doctor_id = request.data.get('target_doctor_id') or request.data.get('doctor_id')
-		if not target_doctor_id:
-			raise ValidationError({'target_doctor_id': 'This field is required.'})
-
-		try:
-			target_doctor = DoctorProfile.objects.select_related('user').get(pk=target_doctor_id)
-		except DoctorProfile.DoesNotExist as exc:
-			raise ValidationError({'target_doctor_id': 'Target doctor does not exist.'}) from exc
-
-		requested_department = str(request.data.get('department', '') or '').strip()
-		if requested_department and requested_department != target_doctor.department:
-			raise ValidationError({'department': 'Department must match the selected target doctor.'})
-
-		raw_scheduled_at = request.data.get('scheduled_at')
-		if not raw_scheduled_at:
-			raise ValidationError({'scheduled_at': 'This field is required.'})
-
-		slot_serializer = AppointmentSerializer(
-			data={'scheduled_at': raw_scheduled_at},
-			partial=True,
-			context={'request': request},
+		is_out_of_specialty = self._coerce_bool(
+			request.data.get('is_out_of_specialty', True),
+			field_name='is_out_of_specialty',
 		)
-		slot_serializer.is_valid(raise_exception=True)
-		scheduled_at = slot_serializer.validated_data.get('scheduled_at')
-		if not scheduled_at:
-			raise ValidationError({'scheduled_at': 'Invalid scheduled date.'})
-		if scheduled_at <= timezone.now():
-			raise ValidationError({'scheduled_at': 'Scheduled date must be in the future.'})
+		opinion = str(
+			request.data.get('out_of_specialty_opinion', '')
+			or request.data.get('opinion', '')
+			or ''
+		).strip()
+		redirect_to_colleague = self._coerce_bool(
+			request.data.get('redirect_to_colleague', True),
+			field_name='redirect_to_colleague',
+		)
 
-		normalized_slot = normalize_slot_datetime(scheduled_at)
-		local_slot = timezone.localtime(scheduled_at).replace(second=0, microsecond=0)
-		if normalized_slot != local_slot:
-			raise ValidationError({'scheduled_at': 'Referral appointment must align with 30-minute slots.'})
-		if local_slot.weekday() == 6:
-			raise ValidationError({'scheduled_at': 'Appointments cannot be scheduled on Sundays.'})
-		if not (DEFAULT_START_TIME <= local_slot.time() < DEFAULT_END_TIME):
-			raise ValidationError({'scheduled_at': 'Referral must be scheduled between 08:00 and 16:00.'})
-
-		if not is_doctor_available_for_slot(target_doctor, normalized_slot):
-			raise ValidationError({'scheduled_at': 'Target doctor is not available for this slot.'})
+		if is_out_of_specialty and not opinion:
+			raise ValidationError({'out_of_specialty_opinion': 'Doctor opinion is required when the case is marked out of specialty.'})
 
 		reason = str(request.data.get('reason', '') or '').strip() or 'Referral consultation'
 		note = str(request.data.get('notes', '') or '').strip()
+		now = timezone.now()
 
-		appointment = Appointment.objects.create(
-			patient=consultation.medical_record.patient,
-			doctor=target_doctor,
-			scheduled_at=normalized_slot,
-			status=Appointment.Status.CONFIRMED,
-			urgency_level=Appointment.UrgencyLevel.MEDIUM,
-			department=target_doctor.department,
-			reason=reason,
-			notes=note,
-			last_staff_action_at=timezone.now(),
-		)
+		if not redirect_to_colleague:
+			consultation.out_of_specialty_confirmed = is_out_of_specialty
+			consultation.out_of_specialty_opinion = opinion
+			consultation.out_of_specialty_validated_at = now if is_out_of_specialty else None
+			consultation.out_of_specialty_validated_by = user if is_out_of_specialty else None
+			consultation.redirect_to_colleague = False
+			consultation.redirect_note = note
+			consultation.redirected_to_doctor = None
+			consultation.redirected_appointment = None
+			consultation.save(
+				update_fields=[
+					'out_of_specialty_confirmed',
+					'out_of_specialty_opinion',
+					'out_of_specialty_validated_at',
+					'out_of_specialty_validated_by',
+					'redirect_to_colleague',
+					'redirect_note',
+					'redirected_to_doctor',
+					'redirected_appointment',
+					'updated_at',
+				],
+			)
 
-		consultation.medical_record.follow_up_plan = self._append_note(
-			consultation.medical_record.follow_up_plan,
-			(
-				f"Referral planned on {timezone.localtime(normalized_slot).strftime('%Y-%m-%d %H:%M')} "
-				f"to Dr. {target_doctor.user.email} ({target_doctor.get_department_display()})."
-			),
-		)
-		consultation.medical_record.save(update_fields=['follow_up_plan', 'updated_at'])
+			consultation.medical_record.follow_up_plan = self._append_note(
+				consultation.medical_record.follow_up_plan,
+				'Case marked outside specialty. Patient informed to request a new appointment with an appropriate specialist.',
+			)
+			consultation.medical_record.save(update_fields=['follow_up_plan', 'updated_at'])
 
-		Notification.objects.create(
-			recipient=consultation.medical_record.patient.user,
-			notification_type=Notification.Type.FOLLOW_UP,
-			title='Referral appointment created',
-			message=(
-				f"A referral appointment was scheduled on "
-				f"{timezone.localtime(normalized_slot).strftime('%Y-%m-%d %H:%M')} with Dr. {target_doctor.user.email}."
-			),
-		)
-
-		if target_doctor.user_id != consultation.doctor.user_id:
 			Notification.objects.create(
-				recipient=target_doctor.user,
+				recipient=consultation.medical_record.patient.user,
 				notification_type=Notification.Type.FOLLOW_UP,
-				title='New referred patient appointment',
-				message=(
-					f"A patient referral was scheduled on "
-					f"{timezone.localtime(normalized_slot).strftime('%Y-%m-%d %H:%M')} "
-					f"from Dr. {consultation.doctor.user.email}."
+				title='Consultation orientation update',
+				message='Your doctor marked this case as outside their specialty. Please request a new appointment with another specialist.',
+			)
+
+			return Response(
+				{
+					'appointment': None,
+					'patient_notified': True,
+					'redirect_to_colleague': False,
+					'consultation': ConsultationSerializer(consultation, context={'request': request}).data,
+				},
+				status=status.HTTP_200_OK,
+			)
+
+		if consultation.redirected_appointment_id and consultation.redirected_appointment and consultation.redirected_appointment.status in [
+			Appointment.Status.PENDING,
+			Appointment.Status.CONFIRMED,
+		]:
+			raise ValidationError({'redirected_appointment': 'An active referral appointment already exists for this consultation.'})
+
+		target_doctor_id = request.data.get('target_doctor_id') or request.data.get('doctor_id')
+		requested_department = str(request.data.get('department', '') or '').strip()
+		raw_scheduled_at = request.data.get('scheduled_at')
+		auto_assigned_doctor = False
+		auto_assigned_slot = False
+
+		if target_doctor_id:
+			try:
+				target_doctor = DoctorProfile.objects.select_related('user').get(pk=target_doctor_id)
+			except DoctorProfile.DoesNotExist as exc:
+				raise ValidationError({'target_doctor_id': 'Target doctor does not exist.'}) from exc
+
+			if target_doctor.id == consultation.doctor_id:
+				raise ValidationError({'target_doctor_id': 'Please select another colleague for this referral.'})
+			if not target_doctor.user.is_active:
+				raise ValidationError({'target_doctor_id': 'Selected doctor account is inactive.'})
+
+			if requested_department and requested_department != target_doctor.department:
+				raise ValidationError({'department': 'Department must match the selected target doctor.'})
+
+			if raw_scheduled_at:
+				slot_serializer = AppointmentSerializer(
+					data={'scheduled_at': raw_scheduled_at},
+					partial=True,
+					context={'request': request},
+				)
+				slot_serializer.is_valid(raise_exception=True)
+				scheduled_at = slot_serializer.validated_data.get('scheduled_at')
+				if not scheduled_at:
+					raise ValidationError({'scheduled_at': 'Invalid scheduled date.'})
+				if scheduled_at <= now:
+					raise ValidationError({'scheduled_at': 'Scheduled date must be in the future.'})
+
+				normalized_slot = normalize_slot_datetime(scheduled_at)
+				local_slot = timezone.localtime(scheduled_at).replace(second=0, microsecond=0)
+				if normalized_slot != local_slot:
+					raise ValidationError({'scheduled_at': 'Referral appointment must align with 30-minute slots.'})
+				if local_slot.weekday() == 6:
+					raise ValidationError({'scheduled_at': 'Appointments cannot be scheduled on Sundays.'})
+				if not (DEFAULT_START_TIME <= local_slot.time() < DEFAULT_END_TIME):
+					raise ValidationError({'scheduled_at': 'Referral must be scheduled between 08:00 and 16:00.'})
+
+				if not is_doctor_available_for_slot(target_doctor, normalized_slot):
+					raise ValidationError({'scheduled_at': 'Target doctor is not available for this slot.'})
+			else:
+				normalized_slot = find_first_available_slot_for_doctor(
+					target_doctor,
+					start_from=normalize_slot_datetime(now + timedelta(minutes=30)),
+				)
+				if not normalized_slot:
+					raise ValidationError({'target_doctor_id': 'No available slot found for this colleague.'})
+				auto_assigned_slot = True
+		else:
+			auto_assigned_doctor = True
+			if not requested_department:
+				raise ValidationError({'department': 'Department is required for automatic colleague assignment.'})
+
+			target_doctor, normalized_slot = self._select_auto_referral_target(
+				source_doctor=consultation.doctor,
+				requested_department=requested_department,
+				start_from=normalize_slot_datetime(now + timedelta(minutes=30)),
+			)
+			if not target_doctor or not normalized_slot:
+				raise ValidationError({'department': 'No available colleague found in this department.'})
+			auto_assigned_slot = True
+
+		with transaction.atomic():
+			appointment = Appointment.objects.create(
+				patient=consultation.medical_record.patient,
+				doctor=target_doctor,
+				scheduled_at=normalized_slot,
+				status=Appointment.Status.CONFIRMED,
+				urgency_level=Appointment.UrgencyLevel.MEDIUM,
+				department=target_doctor.department,
+				reason=reason,
+				notes=note,
+				last_staff_action_at=now,
+			)
+
+			consultation.out_of_specialty_confirmed = is_out_of_specialty
+			consultation.out_of_specialty_opinion = opinion
+			consultation.out_of_specialty_validated_at = now if is_out_of_specialty else None
+			consultation.out_of_specialty_validated_by = user if is_out_of_specialty else None
+			consultation.redirect_to_colleague = True
+			consultation.redirect_note = note
+			consultation.redirected_to_doctor = target_doctor
+			consultation.redirected_appointment = appointment
+			consultation.save(
+				update_fields=[
+					'out_of_specialty_confirmed',
+					'out_of_specialty_opinion',
+					'out_of_specialty_validated_at',
+					'out_of_specialty_validated_by',
+					'redirect_to_colleague',
+					'redirect_note',
+					'redirected_to_doctor',
+					'redirected_appointment',
+					'updated_at',
+				],
+			)
+
+			consultation.medical_record.follow_up_plan = self._append_note(
+				consultation.medical_record.follow_up_plan,
+				(
+					f"Out-of-specialty referral planned on {timezone.localtime(normalized_slot).strftime('%Y-%m-%d %H:%M')} "
+					f"to Dr. {target_doctor.user.email} ({target_doctor.get_department_display()})."
 				),
 			)
+			consultation.medical_record.save(update_fields=['follow_up_plan', 'updated_at'])
+
+			Notification.objects.create(
+				recipient=consultation.medical_record.patient.user,
+				notification_type=Notification.Type.FOLLOW_UP,
+				title='Referral appointment created',
+				message=(
+					f"A referral appointment was automatically scheduled on "
+					f"{timezone.localtime(normalized_slot).strftime('%Y-%m-%d %H:%M')} with Dr. {target_doctor.user.email}."
+				),
+			)
+
+			if target_doctor.user_id != consultation.doctor.user_id:
+				Notification.objects.create(
+					recipient=target_doctor.user,
+					notification_type=Notification.Type.FOLLOW_UP,
+					title='New referred patient appointment',
+					message=(
+						f"A patient referral was scheduled on "
+						f"{timezone.localtime(normalized_slot).strftime('%Y-%m-%d %H:%M')} "
+						f"from Dr. {consultation.doctor.user.email}."
+					),
+				)
 
 		return Response(
 			{
 				'appointment': AppointmentSerializer(appointment, context={'request': request}).data,
 				'target_doctor_email': target_doctor.user.email,
 				'target_department': target_doctor.department,
+				'redirect_to_colleague': True,
+				'auto_assigned_doctor': auto_assigned_doctor,
+				'auto_assigned_slot': auto_assigned_slot,
+				'consultation': ConsultationSerializer(consultation, context={'request': request}).data,
 			},
 			status=status.HTTP_201_CREATED,
 		)
@@ -614,11 +752,150 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 		return ''
 
 	@staticmethod
+	def _select_auto_referral_target(source_doctor, requested_department, start_from):
+		candidate_qs = DoctorProfile.objects.select_related('user').filter(
+			user__is_active=True,
+			department=requested_department,
+		)
+		if source_doctor:
+			candidate_qs = candidate_qs.exclude(pk=source_doctor.pk)
+
+		ranked_targets = []
+		for candidate in candidate_qs:
+			slot = find_first_available_slot_for_doctor(candidate, start_from=start_from)
+			if slot:
+				ranked_targets.append((slot, candidate.id, candidate))
+
+		if not ranked_targets:
+			return None, None
+
+		ranked_targets.sort(key=lambda item: (item[0], item[1]))
+		earliest_slot, _, selected_doctor = ranked_targets[0]
+		return selected_doctor, earliest_slot
+
+	@staticmethod
+	def _coerce_bool(value, field_name='value'):
+		if isinstance(value, bool):
+			return value
+		if isinstance(value, (int, float)):
+			if value in [0, 1]:
+				return bool(value)
+			raise ValidationError({field_name: 'This field must be a boolean.'})
+		if isinstance(value, str):
+			normalized = value.strip().lower()
+			if normalized in ['true', '1', 'yes', 'y', 'on']:
+				return True
+			if normalized in ['false', '0', 'no', 'n', 'off']:
+				return False
+		raise ValidationError({field_name: 'This field must be a boolean.'})
+
+	@staticmethod
 	def _append_note(existing_notes, new_note):
 		current = (existing_notes or '').strip()
 		if not current:
 			return new_note
 		return f"{current}\n{new_note}"
+
+
+class DoctorOperationViewSet(viewsets.ModelViewSet):
+	serializer_class = DoctorOperationSerializer
+	queryset = DoctorOperation.objects.select_related(
+		'medical_record__patient__user',
+		'doctor__user',
+		'consultation',
+		'finished_by',
+	).all()
+	filterset_fields = ['doctor', 'medical_record', 'consultation']
+	search_fields = ['operation_name', 'details', 'medical_record__patient__user__email', 'doctor__user__email']
+	ordering_fields = ['scheduled_start', 'expected_end_at', 'release_at', 'created_at']
+
+	def get_permissions(self):
+		return [permissions.IsAuthenticated()]
+
+	def get_queryset(self):
+		user = self.request.user
+		qs = self.queryset
+		if user.role == 'patient':
+			return qs.filter(medical_record__patient__user=user)
+		if user.role == 'doctor':
+			return qs.filter(doctor__user=user)
+		return qs
+
+	def perform_create(self, serializer):
+		user = self.request.user
+		if user.role not in ['doctor', 'admin']:
+			raise PermissionDenied('Only doctors and admins can plan operations.')
+
+		medical_record = serializer.validated_data.get('medical_record')
+		if not medical_record:
+			raise ValidationError({'medical_record': 'This field is required.'})
+
+		if user.role == 'doctor':
+			doctor_profile = DoctorProfile.objects.filter(user=user).first()
+			if not doctor_profile:
+				raise ValidationError({'doctor': 'Doctor profile is missing for this account.'})
+			MedicalRecordViewSet._ensure_doctor_can_manage_record(doctor_profile, medical_record)
+			operation = serializer.save(doctor=doctor_profile)
+		else:
+			doctor_profile = serializer.validated_data.get('doctor')
+			if not doctor_profile:
+				raise ValidationError({'doctor': 'This field is required.'})
+			operation = serializer.save()
+
+		Notification.objects.create(
+			recipient=medical_record.patient.user,
+			notification_type=Notification.Type.FOLLOW_UP,
+			title='Operation planned',
+			message=(
+				f"Dr. {operation.doctor.user.email} planned an operation '{operation.operation_name}' on "
+				f"{timezone.localtime(operation.scheduled_start).strftime('%Y-%m-%d %H:%M')}."
+			),
+		)
+
+	@action(detail=False, methods=['get'], url_path='active')
+	def active(self, request):
+		user = request.user
+		if user.role not in ['doctor', 'admin']:
+			raise PermissionDenied('Only doctors and admins can access active operation status.')
+
+		if user.role == 'doctor':
+			doctor_profile = DoctorProfile.objects.filter(user=user).first()
+			if not doctor_profile:
+				raise ValidationError({'doctor': 'Doctor profile is missing for this account.'})
+		else:
+			doctor_id = request.query_params.get('doctor_id')
+			if not doctor_id:
+				raise ValidationError({'doctor_id': 'This query parameter is required for admins.'})
+			doctor_profile = DoctorProfile.objects.filter(pk=doctor_id).first()
+			if not doctor_profile:
+				raise ValidationError({'doctor_id': 'Doctor profile not found.'})
+
+		active_operation = get_doctor_blocking_operation(doctor_profile, reference_time=timezone.now())
+		if not active_operation:
+			return Response({'active': False, 'operation': None})
+
+		return Response(
+			{
+				'active': True,
+				'operation': self.get_serializer(active_operation).data,
+			}
+		)
+
+	@action(detail=True, methods=['post'], url_path='finish')
+	def finish(self, request, pk=None):
+		operation = self.get_object()
+		user = request.user
+
+		if user.role not in ['doctor', 'admin']:
+			raise PermissionDenied('Only doctors and admins can finish operations.')
+		if user.role == 'doctor' and operation.doctor.user_id != user.id:
+			raise PermissionDenied('Doctors can only finish their own operations.')
+
+		if operation.finished_at:
+			return Response({'already_finished': True, 'operation': self.get_serializer(operation).data})
+
+		operation.mark_finished(user=user, at_time=timezone.now())
+		return Response({'already_finished': False, 'operation': self.get_serializer(operation).data})
 
 
 class MedicalDocumentRequestViewSet(viewsets.ModelViewSet):

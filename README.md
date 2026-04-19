@@ -108,6 +108,43 @@ npm run dev
 Frontend URL:
 - http://127.0.0.1:5173/
 
+## Docker Deployment (Recommended for staging/production)
+
+1. Copy deployment environment template:
+
+```bash
+cp .env.docker.example .env
+```
+
+PowerShell:
+
+```powershell
+Copy-Item .env.docker.example .env
+```
+
+2. Update `.env` values (`POSTGRES_PASSWORD`, `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`).
+
+3. Build and run containers:
+
+```bash
+docker compose up -d --build
+```
+
+4. Access app:
+
+- Frontend: http://localhost/
+- API docs: http://localhost/api/docs/swagger/
+- Admin: http://localhost/admin/
+
+5. First-time admin account:
+
+```bash
+docker compose exec backend python manage.py createsuperuser
+```
+
+Detailed guide:
+- `DOCKER_DEPLOYMENT.md`
+
 ## Core API Endpoints
 
 - POST /api/auth/register/
@@ -160,3 +197,21 @@ Frontend packages:
 - Axios interceptor auto-attaches Bearer token and refreshes token on 401.
 - Role-aware sidebar and route guards are implemented in the frontend.
 - Backend default pagination is 20 items/page with filter/search/ordering enabled.
+
+## Demo Scenario Seed
+
+To load a full demo dataset (1 admin, 5 doctors, 10 patients, 10 appointments), run:
+
+```bash
+cd BackEnd
+python manage.py seed_demo_platform --reset
+```
+
+Default password for all demo accounts:
+
+```text
+DemoPass123!
+```
+
+Full scenario and walkthrough:
+- See `DEMO_PLATFORM_SCENARIO.md`

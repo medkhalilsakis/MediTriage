@@ -169,3 +169,63 @@ class DoctorLeaveRequestTests(APITestCase):
 			is_staff=is_staff,
 			is_active=True,
 		)
+
+
+class DoctorAccountLifecycleTests(APITestCase):
+	def setUp(self):
+		self.admin_user = CustomUser.objects.create_user(
+			email='admin-users@meditriage.test',
+			username='admin-users',
+			password='StrongPass123!',
+			role=CustomUser.Role.ADMIN,
+			is_staff=True,
+			is_active=True,
+		)
+		self.doctor_user = CustomUser.objects.create_user(
+			email='doctor-users@meditriage.test',
+			username='doctor-users',
+			password='StrongPass123!',
+			role=CustomUser.Role.DOCTOR,
+			is_active=True,
+		)
+		self.doctor_profile = DoctorProfile.objects.create(
+			user=self.doctor_user,
+			specialization='General specialist',
+			department=DoctorProfile.Department.GENERAL_MEDICINE,
+			license_number='DOC-USERS-001',
+		)
+
+	def test_admin_can_deactivate_and_reactivate_doctor_account(self):
+		self.client.force_authenticate(user=self.admin_user)
+
+		deactivate_response = self.client.post(
+			f'/api/doctors/profiles/{self.doctor_profile.id}/deactivate/',
+			{},
+			format='json',
+		)
+		self.assertEqual(deactivate_response.status_code, status.HTTP_200_OK)
+		self.assertFalse(deactivate_response.data['is_active'])
+
+		self.doctor_user.refresh_from_db()
+		self.assertFalse(self.doctor_user.is_active)
+
+		reactivate_response = self.client.post(
+			f'/api/doctors/profiles/{self.doctor_profile.id}/reactivate/',
+			{},
+			format='json',
+		)
+		self.assertEqual(reactivate_response.status_code, status.HTTP_200_OK)
+		self.assertTrue(reactivate_response.data['is_active'])
+
+		self.doctor_user.refresh_from_db()
+		self.assertTrue(self.doctor_user.is_active)
+
+	def test_non_admin_cannot_toggle_doctor_account(self):
+		self.client.force_authenticate(user=self.doctor_user)
+
+		response = self.client.post(
+			f'/api/doctors/profiles/{self.doctor_profile.id}/deactivate/',
+			{},
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

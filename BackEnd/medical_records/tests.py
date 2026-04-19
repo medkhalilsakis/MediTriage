@@ -11,6 +11,7 @@ from authentication.models import CustomUser
 from chatbot.models import ChatbotMessage, ChatbotSession
 from doctors.models import DoctorProfile
 from follow_up.models import FollowUp
+from notifications.models import Notification
 from patients.models import PatientProfile
 
 from .models import Consultation, MedicalDocument, MedicalDocumentRequest, MedicalRecord
@@ -291,16 +292,15 @@ class MedicalDocumentWorkflowTests(APITestCase):
 			).exists()
 		)
 
-	def test_doctor_can_refer_patient_to_other_department(self):
-		scheduled_at = self._dt(days=3, hour=11)
-
+	def test_doctor_can_refer_patient_to_other_department_with_auto_scheduling(self):
 		self.client.force_authenticate(user=self.doctor_user)
 		response = self.client.post(
 			f'/api/medical-records/consultations/{self.consultation.id}/refer/',
 			{
-				'target_doctor_id': self.referral_doctor.id,
+				'is_out_of_specialty': True,
+				'out_of_specialty_opinion': 'Symptoms indicate cardiology scope.',
+				'redirect_to_colleague': True,
 				'department': self.referral_doctor.department,
-				'scheduled_at': scheduled_at.isoformat(),
 				'reason': 'Cardiology referral',
 				'notes': 'Please evaluate chest pain history.',
 			},
@@ -314,6 +314,49 @@ class MedicalDocumentWorkflowTests(APITestCase):
 		self.assertEqual(appointment.doctor_id, self.referral_doctor.id)
 		self.assertEqual(appointment.department, self.referral_doctor.department)
 		self.assertEqual(appointment.patient_id, self.patient_profile.id)
+		self.assertGreater(appointment.scheduled_at, timezone.now())
+		self.assertTrue(response.data.get('auto_assigned_doctor'))
+		self.assertTrue(response.data.get('auto_assigned_slot'))
+
+		self.consultation.refresh_from_db()
+		self.assertTrue(self.consultation.out_of_specialty_confirmed)
+		self.assertTrue(self.consultation.redirect_to_colleague)
+		self.assertEqual(self.consultation.redirected_to_doctor_id, self.referral_doctor.id)
+		self.assertEqual(self.consultation.redirected_appointment_id, appointment.id)
+
+	def test_doctor_can_mark_out_of_specialty_without_redirect_and_notify_patient(self):
+		self.client.force_authenticate(user=self.doctor_user)
+		response = self.client.post(
+			f'/api/medical-records/consultations/{self.consultation.id}/refer/',
+			{
+				'is_out_of_specialty': True,
+				'out_of_specialty_opinion': 'This case should be handled by a different specialist.',
+				'redirect_to_colleague': False,
+				'notes': 'Patient advised to request another specialty appointment.',
+			},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertIsNone(response.data['appointment'])
+		self.assertTrue(response.data['patient_notified'])
+
+		self.consultation.refresh_from_db()
+		self.assertTrue(self.consultation.out_of_specialty_confirmed)
+		self.assertFalse(self.consultation.redirect_to_colleague)
+		self.assertIsNone(self.consultation.redirected_to_doctor)
+		self.assertIsNone(self.consultation.redirected_appointment)
+
+		self.assertEqual(
+			Appointment.objects.filter(patient=self.patient_profile, doctor=self.referral_doctor).count(),
+			0,
+		)
+		self.assertTrue(
+			Notification.objects.filter(
+				recipient=self.patient_user,
+				title='Consultation orientation update',
+			).exists()
+		)
 
 	def test_doctor_can_archive_and_reopen_medical_record(self):
 		self.client.force_authenticate(user=self.doctor_user)

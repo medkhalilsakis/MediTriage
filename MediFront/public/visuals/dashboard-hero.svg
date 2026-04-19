@@ -1,0 +1,28 @@
+<svg width="420" height="220" viewBox="0 0 420 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="hero-bg" x1="10" y1="8" x2="400" y2="212" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ECF8FF"/>
+      <stop offset="1" stop-color="#E6F8F1"/>
+    </linearGradient>
+    <linearGradient id="hero-line" x1="44" y1="160" x2="320" y2="78" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1D8FC6"/>
+      <stop offset="1" stop-color="#0BA37F"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="418" height="218" rx="24" fill="url(#hero-bg)" stroke="#B9DFEF"/>
+
+  <rect x="40" y="42" width="146" height="122" rx="14" fill="#FFFFFF" stroke="#D7E8F3"/>
+  <rect x="60" y="66" width="92" height="12" rx="6" fill="#D7EAF7"/>
+  <rect x="60" y="90" width="66" height="10" rx="5" fill="#E5F1F8"/>
+  <rect x="60" y="112" width="102" height="10" rx="5" fill="#E5F1F8"/>
+  <rect x="60" y="134" width="80" height="10" rx="5" fill="#E5F1F8"/>
+
+  <rect x="230" y="34" width="148" height="152" rx="18" fill="#FFFFFF" stroke="#D7E8F3"/>
+  <path d="M250 148L274 116L296 134L326 86L358 114" stroke="url(#hero-line)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="274" cy="116" r="5" fill="#1D8FC6"/>
+  <circle cx="326" cy="86" r="5" fill="#0BA37F"/>
+
+  <rect x="252" y="58" width="70" height="16" rx="8" fill="#E9F5FB"/>
+  <rect x="324" y="58" width="34" height="16" rx="8" fill="#DDF5EE"/>
+</svg>

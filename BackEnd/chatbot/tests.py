@@ -125,3 +125,39 @@ class ChatbotConversationFlowTests(APITestCase):
 			role=role,
 			is_active=True,
 		)
+
+
+class PublicChatbotEndpointTests(APITestCase):
+	def test_public_chatbot_allows_anonymous_health_triage(self):
+		response = self.client.post(
+			'/api/chatbot/public/message/',
+			{'content': 'I have fever, cough, and headache for two days.'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['response_type'], 'triage')
+		self.assertIn('bot_message', response.data)
+		self.assertIsInstance(response.data.get('analysis'), dict)
+
+	def test_public_chatbot_rejects_out_of_scope_requests(self):
+		response = self.client.post(
+			'/api/chatbot/public/message/',
+			{'content': 'Write me a JavaScript sorting algorithm.'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['response_type'], 'out_of_scope')
+		self.assertIn('healthcare triage chatbot', response.data['bot_message']['content'].lower())
+
+	def test_public_chatbot_booking_requires_authentication(self):
+		response = self.client.post(
+			'/api/chatbot/public/message/',
+			{'content': 'I have chest pain and fever, please book an appointment now.'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertTrue(response.data['booking_auth_required'])
+		self.assertIn('log in or sign up', response.data['bot_message']['content'].lower())

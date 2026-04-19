@@ -21,7 +21,7 @@ class DoctorProfileViewSet(viewsets.ModelViewSet):
 	ordering_fields = ['created_at', 'updated_at', 'years_of_experience']
 
 	def get_permissions(self):
-		if self.action in ['destroy']:
+		if self.action in ['destroy', 'deactivate', 'reactivate']:
 			permission_classes = [permissions.IsAuthenticated, IsAdmin]
 		else:
 			permission_classes = [permissions.IsAuthenticated]
@@ -34,6 +34,64 @@ class DoctorProfileViewSet(viewsets.ModelViewSet):
 		if self.request.user.role not in ['admin', 'doctor']:
 			raise PermissionDenied('Only doctor or admin can create doctor profiles.')
 		serializer.save()
+
+	def _toggle_account_state(self, doctor_profile, target_state):
+		user = doctor_profile.user
+		if user.is_active == target_state:
+			return False
+		user.is_active = target_state
+		user.save(update_fields=['is_active'])
+		return True
+
+	@action(detail=True, methods=['post'], url_path='deactivate')
+	def deactivate(self, request, pk=None):
+		if request.user.role != 'admin':
+			raise PermissionDenied('Only admin can deactivate doctor accounts.')
+
+		doctor_profile = self.get_object()
+		changed = self._toggle_account_state(doctor_profile, target_state=False)
+
+		if changed:
+			Notification.objects.create(
+				recipient=doctor_profile.user,
+				notification_type=Notification.Type.SYSTEM,
+				title='Doctor account deactivated',
+				message='Your account has been temporarily deactivated by administration.',
+			)
+
+		return Response(
+			{
+				'detail': 'Doctor account deactivated.' if changed else 'Doctor account is already deactivated.',
+				'is_active': doctor_profile.user.is_active,
+				'doctor': self.get_serializer(doctor_profile).data,
+			},
+			status=status.HTTP_200_OK,
+		)
+
+	@action(detail=True, methods=['post'], url_path='reactivate')
+	def reactivate(self, request, pk=None):
+		if request.user.role != 'admin':
+			raise PermissionDenied('Only admin can reactivate doctor accounts.')
+
+		doctor_profile = self.get_object()
+		changed = self._toggle_account_state(doctor_profile, target_state=True)
+
+		if changed:
+			Notification.objects.create(
+				recipient=doctor_profile.user,
+				notification_type=Notification.Type.SYSTEM,
+				title='Doctor account reactivated',
+				message='Your account has been reactivated by administration.',
+			)
+
+		return Response(
+			{
+				'detail': 'Doctor account reactivated.' if changed else 'Doctor account is already active.',
+				'is_active': doctor_profile.user.is_active,
+				'doctor': self.get_serializer(doctor_profile).data,
+			},
+			status=status.HTTP_200_OK,
+		)
 
 
 class DoctorAvailabilitySlotViewSet(viewsets.ModelViewSet):

@@ -1,0 +1,20 @@
+<svg width="1200" height="420" viewBox="0 0 1200 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="waveA" x1="0" y1="0" x2="1200" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E7F7FF"/>
+      <stop offset="1" stop-color="#E8F9F1"/>
+    </linearGradient>
+    <linearGradient id="waveB" x1="150" y1="40" x2="960" y2="360" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7EC2E8" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#4CBF99" stop-opacity="0.32"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="420" fill="url(#waveA)"/>
+
+  <path d="M0 286C104 252 200 242 306 248C410 254 494 300 608 304C730 309 800 248 910 234C1013 221 1098 242 1200 276V420H0V286Z" fill="url(#waveB)"/>
+  <path d="M0 318C124 278 222 272 334 284C434 296 530 344 638 350C760 356 834 305 942 292C1040 280 1128 299 1200 332V420H0V318Z" fill="#A3D4EA" fill-opacity="0.26"/>
+
+  <circle cx="132" cy="92" r="58" fill="#9ED2EA" fill-opacity="0.35"/>
+  <circle cx="1038" cy="114" r="74" fill="#9EE0CC" fill-opacity="0.33"/>
+</svg>

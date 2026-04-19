@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
+import { Link } from 'react-router-dom'
 import {
   listConsultations,
   listMedicalDocumentRequests,
@@ -200,6 +201,14 @@ function MedicalRecordPage() {
                       Status: <span className={`status-tag ${item.status}`}>{item.status}</span>
                     </p>
                     <p>Doctor: {item.doctor_email || 'N/A'}</p>
+                    {item.doctor_email ? (
+                      <Link
+                        className="ghost-btn inline-action"
+                        to={`/patient/messages?contact=${encodeURIComponent(item.doctor_email)}`}
+                      >
+                        Contact this doctor
+                      </Link>
+                    ) : null}
                     <p>{item.description || 'No additional description.'}</p>
                     {(item.requested_items || []).length > 0 ? (
                       <p className="muted">Requested items: {(item.requested_items || []).join(', ')}</p>
@@ -336,6 +345,14 @@ function MedicalRecordPage() {
             <p>Diagnosis: {consultation.diagnosis}</p>
             <p>ICD10: {consultation.icd10_code || 'N/A'}</p>
             <p>Anamnesis: {consultation.anamnesis || 'N/A'}</p>
+            {consultation.doctor_email ? (
+              <Link
+                className="ghost-btn inline-action"
+                to={`/patient/messages?contact=${encodeURIComponent(consultation.doctor_email)}`}
+              >
+                Contact doctor
+              </Link>
+            ) : null}
           </article>
         ))}
       </section>

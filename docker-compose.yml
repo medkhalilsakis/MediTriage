@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: medismart-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-medismart}
+      POSTGRES_USER: ${POSTGRES_USER:-medismart}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-medismart123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-medismart} -d ${POSTGRES_DB:-medismart}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./BackEnd
+      dockerfile: Dockerfile
+    container_name: medismart-backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SECRET_KEY: ${DJANGO_SECRET_KEY:-change-this-in-production}
+      DEBUG: ${DJANGO_DEBUG:-False}
+      ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: ${POSTGRES_DB:-medismart}
+      DB_USER: ${POSTGRES_USER:-medismart}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-medismart123}
+      DB_HOST: db
+      DB_PORT: "5432"
+      CORS_ALLOW_ALL: ${CORS_ALLOW_ALL:-False}
+    volumes:
+      - static_data:/app/staticfiles
+      - media_data:/app/media
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./MediFront
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+    container_name: medismart-frontend
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    volumes:
+      - static_data:/var/www/static:ro
+      - media_data:/var/www/media:ro
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  static_data:
+  media_data:

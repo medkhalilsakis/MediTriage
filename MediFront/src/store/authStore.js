@@ -1,8 +1,11 @@
 import { create } from 'zustand'
 
+const AUTH_STORAGE_KEY = 'meditriage_auth'
+const LEGACY_AUTH_STORAGE_KEY = 'medismart_auth'
+
 const getInitialAuth = () => {
   try {
-    const raw = localStorage.getItem('medismart_auth')
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY) || localStorage.getItem(LEGACY_AUTH_STORAGE_KEY)
     if (!raw) return { user: null, accessToken: null, refreshToken: null }
     return JSON.parse(raw)
   } catch {
@@ -16,7 +19,8 @@ const persistAuth = (state) => {
     accessToken: state.accessToken,
     refreshToken: state.refreshToken,
   }
-  localStorage.setItem('medismart_auth', JSON.stringify(payload))
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(payload))
+  localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY)
 }
 
 const initial = getInitialAuth()
@@ -47,7 +51,8 @@ export const useAuthStore = create((set, get) => ({
 
   logout: () => {
     set({ user: null, accessToken: null, refreshToken: null })
-    localStorage.removeItem('medismart_auth')
+    localStorage.removeItem(AUTH_STORAGE_KEY)
+    localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY)
   },
 
   isAuthenticated: () => Boolean(get().accessToken),
