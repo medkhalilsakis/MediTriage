@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import { useNavigate } from 'react-router-dom'
@@ -23,6 +23,7 @@ const INITIAL_LEAVE_FORM = {
 }
 
 const SLOT_DURATION_MINUTES = 30
+const REALTIME_REFRESH_MS = 5000
 const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 const pad2 = (value) => String(value).padStart(2, '0')
@@ -104,9 +105,51 @@ const extractApiError = (error, fallback) => {
   return fallback
 }
 
+const notifyBrowserAppointment = (appointment) => {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return
+  }
+
+  const patientLabel = appointment?.patient_email || 'patient'
+  const dateLabel = appointment?.scheduled_at
+    ? new Date(appointment.scheduled_at).toLocaleString()
+    : 'new timeslot'
+
+  const showNotification = () => {
+    try {
+      new Notification('New appointment assigned', {
+        body: `${patientLabel} - ${dateLabel}`,
+        icon: '/visuals/meditriage-mark.svg',
+        tag: `doctor-appointment-${appointment?.id || Date.now()}`,
+      })
+    } catch {
+      // Ignore browser notification runtime failures.
+    }
+  }
+
+  if (Notification.permission === 'granted') {
+    showNotification()
+    return
+  }
+
+  if (Notification.permission === 'default') {
+    Notification.requestPermission()
+      .then((permission) => {
+        if (permission === 'granted') {
+          showNotification()
+        }
+      })
+      .catch(() => {
+        // Ignore permission prompt failures.
+      })
+  }
+}
+
 function DoctorDashboard() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const seenActiveAppointmentIds = useRef(new Set())
+  const hasBaselineAppointments = useRef(false)
 
   const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().slice(0, 10))
   const [calendarCursor, setCalendarCursor] = useState(new Date())
@@ -117,8 +160,17 @@ function DoctorDashboard() {
   const todayQuery = useQuery({
     queryKey: ['appointments-today', scheduleDate],
     queryFn: () => getTodayAppointments({ date: scheduleDate }),
+    refetchInterval: REALTIME_REFRESH_MS,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   })
-  const allQuery = useQuery({ queryKey: ['appointments-all'], queryFn: listAppointments })
+  const allQuery = useQuery({
+    queryKey: ['appointments-all'],
+    queryFn: listAppointments,
+    refetchInterval: REALTIME_REFRESH_MS,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
+  })
   const leavesQuery = useQuery({ queryKey: ['doctor-leaves'], queryFn: listDoctorLeaves })
   const consultationsQuery = useQuery({ queryKey: ['doctor-consultations-history'], queryFn: listConsultations })
 
@@ -308,6 +360,31 @@ function DoctorDashboard() {
     })
   }, [completedAppointments, consultationByAppointmentId, historySearch])
 
+  useEffect(() => {
+    const activeRealtimeAppointments = all.filter((item) => ['pending', 'confirmed'].includes(item.status))
+    const currentIds = new Set(activeRealtimeAppointments.map((item) => item.id))
+
+    if (!hasBaselineAppointments.current) {
+      seenActiveAppointmentIds.current = currentIds
+      hasBaselineAppointments.current = true
+      return
+    }
+
+    const newAppointments = activeRealtimeAppointments.filter(
+      (item) => !seenActiveAppointmentIds.current.has(item.id),
+    )
+
+    if (newAppointments.length > 0) {
+      newAppointments.slice(0, 3).forEach((appointment) => {
+        const whenLabel = new Date(appointment.scheduled_at).toLocaleString()
+        toast.success(`New appointment #${appointment.id}: ${appointment.patient_email} - ${whenLabel}`)
+        notifyBrowserAppointment(appointment)
+      })
+    }
+
+    seenActiveAppointmentIds.current = currentIds
+  }, [all])
+
   const handleLeaveSubmit = (event) => {
     event.preventDefault()
 
@@ -419,6 +496,7 @@ function DoctorDashboard() {
             >
               Next month
             </button>
+            <span className="chip">Live sync: {REALTIME_REFRESH_MS / 1000}s</span>
           </div>
         </div>
 

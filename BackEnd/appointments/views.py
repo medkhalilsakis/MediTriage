@@ -9,6 +9,7 @@ from rest_framework.response import Response
 
 from doctors.models import DoctorProfile
 from medical_records.operations import ensure_doctor_not_blocked_now
+from notifications.models import Notification
 
 from .models import Appointment, AppointmentAdvanceOffer
 from .scheduling import (
@@ -203,6 +204,12 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             update_fields=['doctor', 'department', 'scheduled_at', 'status', 'last_staff_action_at', 'notes', 'updated_at']
         )
 
+        if old_doctor.id != target_doctor.id:
+            self._notify_doctor_new_appointment(
+                appointment,
+                source_label='appointment reassignment',
+            )
+
         if old_doctor.id != target_doctor.id or old_slot != target_slot:
             trigger_waitlist_for_freed_slot(doctor=old_doctor, freed_slot=old_slot, actor=user)
 
@@ -266,12 +273,17 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                         {'detail': 'No doctor is currently available for automated scheduling.'}
                     )
 
-                serializer.save(
+                appointment = serializer.save(
                     patient=patient_profile,
                     doctor=doctor,
                     scheduled_at=scheduled_at,
                     department=effective_department,
                     status=Appointment.Status.CONFIRMED,
+                )
+
+                self._notify_doctor_new_appointment(
+                    appointment,
+                    source_label='patient self-booking',
                 )
             return
 
@@ -290,13 +302,19 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             if not is_doctor_available_for_slot(doctor=doctor_profile, slot_datetime=scheduled_at):
                 raise ValidationError({'scheduled_at': 'Selected slot is not available for this doctor.'})
 
-            serializer.save(
+            appointment = serializer.save(
                 doctor=doctor_profile,
                 scheduled_at=scheduled_at,
                 department=serializer.validated_data.get('department') or doctor_profile.department,
                 status=Appointment.Status.CONFIRMED,
                 last_staff_action_at=timezone.now(),
             )
+
+            if appointment.doctor.user_id != user.id:
+                self._notify_doctor_new_appointment(
+                    appointment,
+                    source_label='doctor-created booking',
+                )
             return
 
         doctor = serializer.validated_data.get('doctor')
@@ -312,11 +330,16 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if not is_doctor_available_for_slot(doctor=doctor, slot_datetime=scheduled_at):
             raise ValidationError({'scheduled_at': 'Selected slot is not available for this doctor.'})
 
-        serializer.save(
+        appointment = serializer.save(
             scheduled_at=scheduled_at,
             department=serializer.validated_data.get('department') or doctor.department,
             status=Appointment.Status.CONFIRMED,
             last_staff_action_at=timezone.now(),
+        )
+
+        self._notify_doctor_new_appointment(
+            appointment,
+            source_label='admin booking',
         )
 
     def perform_update(self, serializer):
@@ -428,6 +451,30 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Only doctor or admin can manage this appointment action.')
         if user.role == 'doctor' and appointment.doctor.user_id != user.id:
             raise PermissionDenied('Doctors can only manage their own appointments.')
+
+    @staticmethod
+    def _notify_doctor_new_appointment(appointment, source_label='system'):
+        if not appointment or not appointment.doctor_id:
+            return
+
+        doctor_user = getattr(appointment.doctor, 'user', None)
+        if not doctor_user:
+            return
+
+        patient_label = 'deleted user'
+        if appointment.patient:
+            patient_label = appointment.patient.get_public_identity_label()
+
+        schedule_label = timezone.localtime(appointment.scheduled_at).strftime('%Y-%m-%d %H:%M')
+        Notification.objects.create(
+            recipient=doctor_user,
+            notification_type=Notification.Type.APPOINTMENT,
+            title='New appointment assigned',
+            message=(
+                f"Appointment #{appointment.id} assigned ({source_label}). "
+                f"Patient: {patient_label}. Scheduled at: {schedule_label}."
+            ),
+        )
 
     @staticmethod
     def _append_action_note(existing_notes, note):

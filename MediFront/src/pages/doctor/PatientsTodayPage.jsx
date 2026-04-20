@@ -7,6 +7,7 @@ import { completeAppointment, delayAppointment, getTodayAppointments } from '../
 const WORKING_HOUR_START = 8
 const WORKING_HOUR_END = 16
 const SLOT_DURATION_MINUTES = 30
+const REALTIME_REFRESH_MS = 5000
 
 const formatHourLabel = (hour) => `${String(hour).padStart(2, '0')}:00 - ${String(hour + 1).padStart(2, '0')}:00`
 
@@ -104,6 +105,9 @@ function PatientsTodayPage() {
   const dailyPatientsQuery = useQuery({
     queryKey: ['doctor-patients-daily', selectedDate],
     queryFn: () => getTodayAppointments({ date: selectedDate }),
+    refetchInterval: REALTIME_REFRESH_MS,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   })
 
   const appointments = dailyPatientsQuery.data?.results || dailyPatientsQuery.data || []
@@ -197,6 +201,7 @@ function PatientsTodayPage() {
 
           <div className="doctor-day-summary">
             <span className="chip">Displayed patients: {totalShown}</span>
+            <span className="chip">Live sync: {REALTIME_REFRESH_MS / 1000}s</span>
             <Link className="ghost-btn inline-action" to="/doctor/dashboard">
               Open dashboard actions
             </Link>
