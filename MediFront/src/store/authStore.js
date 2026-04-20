@@ -2,6 +2,27 @@ import { create } from 'zustand'
 
 const AUTH_STORAGE_KEY = 'meditriage_auth'
 const LEGACY_AUTH_STORAGE_KEY = 'medismart_auth'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api'
+
+const postOfflinePresence = (accessToken) => {
+  if (!accessToken) {
+    return
+  }
+
+  try {
+    fetch(`${API_BASE_URL}/messaging/presence/heartbeat/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ is_online: false }),
+      keepalive: true,
+    })
+  } catch {
+    // Ignore best-effort presence update errors during logout.
+  }
+}
 
 const getInitialAuth = () => {
   try {
@@ -50,6 +71,7 @@ export const useAuthStore = create((set, get) => ({
   },
 
   logout: () => {
+    postOfflinePresence(get().accessToken)
     set({ user: null, accessToken: null, refreshToken: null })
     localStorage.removeItem(AUTH_STORAGE_KEY)
     localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY)

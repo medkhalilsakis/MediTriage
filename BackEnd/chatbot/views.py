@@ -5,9 +5,10 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.utils import timezone
 
 from appointments.models import Appointment
-from appointments.scheduling import assign_doctor_and_slot
+from appointments.scheduling import assign_doctor_and_slot_for_patient
 from .ai_service import analyze_symptoms, build_health_chat_response
 from doctors.models import DoctorProfile
 from .models import ChatbotMessage, ChatbotSession
@@ -193,9 +194,12 @@ class ChatbotSessionViewSet(viewsets.ModelViewSet):
 			if decision is True:
 				booking_payload = self._book_appointment_from_session(session)
 				if booking_payload['created']:
+					notice = booking_payload.get('notice')
+					notice_line = f"{notice} " if notice else ''
 					bot_reply = (
 						f"Appointment booked successfully. ID: {booking_payload['appointment_id']}, "
 						f"date: {booking_payload['scheduled_at']}, doctor: {booking_payload['doctor_email']}. "
+						f"{notice_line}"
 						"My diagnostic role for this conversation is complete. Please start a new conversation if needed."
 					)
 					bot_message = ChatbotMessage.objects.create(
@@ -370,8 +374,9 @@ class ChatbotSessionViewSet(viewsets.ModelViewSet):
 		reason = self._build_appointment_reason_from_analysis(analysis)
 
 		with transaction.atomic():
-			doctor, scheduled_at, effective_department = assign_doctor_and_slot(
+			doctor, scheduled_at, effective_department, conflicting_appointment = assign_doctor_and_slot_for_patient(
 				requested_department=department,
+				patient=session.patient,
 				now=None,
 			)
 
@@ -402,6 +407,15 @@ class ChatbotSessionViewSet(viewsets.ModelViewSet):
 			session.is_closed = True
 			session.save(update_fields=['booked_appointment', 'awaiting_appointment_confirmation', 'is_closed', 'updated_at'])
 
+		notice = None
+		if conflicting_appointment and conflicting_appointment.scheduled_at:
+			existing_label = timezone.localtime(conflicting_appointment.scheduled_at).strftime('%Y-%m-%d %H:%M')
+			new_label = timezone.localtime(appointment.scheduled_at).strftime('%Y-%m-%d %H:%M')
+			notice = (
+				'Multiple appointments on the same day are not allowed. '
+				f'Your existing appointment is on {existing_label}, so this booking was moved to {new_label}.'
+			)
+
 		return {
 			'created': True,
 			'appointment_id': appointment.id,
@@ -409,6 +423,8 @@ class ChatbotSessionViewSet(viewsets.ModelViewSet):
 			'doctor_email': appointment.doctor.user.email,
 			'department': appointment.department,
 			'urgency_level': appointment.urgency_level,
+			'same_day_limit_applied': bool(conflicting_appointment),
+			'notice': notice,
 		}
 
 	def _map_department_to_appointment(self, department_name):

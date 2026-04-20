@@ -10,15 +10,12 @@ import {
   listMessagingConversations,
   openMessagingConversation,
   sendConversationMessage,
-  sendPresenceHeartbeat,
 } from '../../api/messagingApi'
 import { useAuthStore } from '../../store/authStore'
 
 const REFRESH_CONTACTS_MS = 5000
 const REFRESH_CONVERSATIONS_MS = 5000
 const REFRESH_MESSAGES_MS = 2500
-const HEARTBEAT_MS = 20000
-
 const formatDateTime = (value) => {
   if (!value) {
     return ''
@@ -70,8 +67,6 @@ function MessagingPage() {
     refetchInterval: REFRESH_MESSAGES_MS,
     refetchOnWindowFocus: true,
   })
-
-  const heartbeatMutation = useMutation({ mutationFn: sendPresenceHeartbeat })
 
   const openConversationMutation = useMutation({
     mutationFn: openMessagingConversation,
@@ -129,20 +124,6 @@ function MessagingPage() {
 
     return null
   }, [messagesQuery.data, activeConversation, activeContactId, contacts])
-
-  useEffect(() => {
-    heartbeatMutation.mutate({ is_online: true })
-
-    const timer = setInterval(() => {
-      heartbeatMutation.mutate({ is_online: true })
-    }, HEARTBEAT_MS)
-
-    return () => {
-      clearInterval(timer)
-      heartbeatMutation.mutate({ is_online: false })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   useEffect(() => {
     if (activeConversationId || conversations.length === 0) {

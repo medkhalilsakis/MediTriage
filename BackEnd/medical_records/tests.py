@@ -292,6 +292,69 @@ class MedicalDocumentWorkflowTests(APITestCase):
 			).exists()
 		)
 
+	def test_schedule_follow_up_rejects_second_same_day_appointment(self):
+		existing_same_day = self._dt(days=3, hour=9)
+		requested_follow_up = self._dt(days=3, hour=11)
+
+		Appointment.objects.create(
+			patient=self.patient_profile,
+			doctor=self.referral_doctor,
+			scheduled_at=existing_same_day,
+			status=Appointment.Status.CONFIRMED,
+			urgency_level=Appointment.UrgencyLevel.MEDIUM,
+			department=self.referral_doctor.department,
+			reason='Existing same-day appointment before follow-up scheduling',
+		)
+
+		self.client.force_authenticate(user=self.doctor_user)
+		response = self.client.post(
+			f'/api/medical-records/consultations/{self.consultation.id}/schedule-follow-up/',
+			{
+				'scheduled_at': requested_follow_up.isoformat(),
+				'notes': 'Should be rejected by daily limit.',
+				'reason': 'Follow-up attempt on occupied day',
+			},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('scheduled_at', response.data)
+		self.assertEqual(FollowUp.objects.filter(consultation=self.consultation).count(), 0)
+
+	def test_referral_rejects_second_same_day_appointment(self):
+		existing_same_day = self._dt(days=4, hour=9)
+		requested_referral = self._dt(days=4, hour=11)
+
+		Appointment.objects.create(
+			patient=self.patient_profile,
+			doctor=self.doctor_profile,
+			scheduled_at=existing_same_day,
+			status=Appointment.Status.CONFIRMED,
+			urgency_level=Appointment.UrgencyLevel.MEDIUM,
+			department=self.doctor_profile.department,
+			reason='Existing same-day appointment before referral',
+		)
+
+		self.client.force_authenticate(user=self.doctor_user)
+		response = self.client.post(
+			f'/api/medical-records/consultations/{self.consultation.id}/refer/',
+			{
+				'is_out_of_specialty': True,
+				'out_of_specialty_opinion': 'Needs cardiology follow-up.',
+				'redirect_to_colleague': True,
+				'target_doctor_id': self.referral_doctor.id,
+				'scheduled_at': requested_referral.isoformat(),
+				'reason': 'Referral attempt on occupied day',
+				'notes': 'Should be rejected by daily limit.',
+			},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('scheduled_at', response.data)
+		self.consultation.refresh_from_db()
+		self.assertIsNone(self.consultation.redirected_appointment)
+
 	def test_doctor_can_refer_patient_to_other_department_with_auto_scheduling(self):
 		self.client.force_authenticate(user=self.doctor_user)
 		response = self.client.post(

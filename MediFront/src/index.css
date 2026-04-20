@@ -4011,6 +4011,116 @@ button:disabled {
   background: #ffffff;
 }
 
+/* ========== ADMIN REPORTS ========== */
+
+.reports-page {
+  gap: 0.78rem;
+}
+
+.reports-hero {
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  background:
+    radial-gradient(circle at 95% 4%, rgba(37, 99, 235, 0.14), transparent 30%),
+    radial-gradient(circle at 8% 2%, rgba(239, 91, 63, 0.16), transparent 28%),
+    linear-gradient(145deg, #ffffff, #f7fbff);
+}
+
+.reports-kpi-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.reports-kpi-card {
+  display: grid;
+  gap: 0.2rem;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #dce9f8;
+  background: linear-gradient(145deg, #ffffff, #f8fbff);
+}
+
+.reports-kpi-card::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3px;
+  background: linear-gradient(90deg, #ef5b3f, #0c8a82, #2563eb);
+  opacity: 0.42;
+}
+
+.reports-kpi-card .reports-kpi-icon {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  background: linear-gradient(135deg, #0c8a82, #2563eb);
+  margin: 0 0 0.24rem;
+}
+
+.reports-panel {
+  border: 1px solid #dbe7f6;
+  background: linear-gradient(145deg, #ffffff, #f8fbff);
+}
+
+.reports-chart-grid {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.reports-chart-card {
+  border: 1px solid #dbe7f6;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #ffffff, #fafdff);
+  padding: 0.68rem;
+}
+
+.reports-chart-card h4 {
+  margin: 0 0 0.4rem;
+  color: #21374d;
+}
+
+.reports-insights-grid {
+  align-items: start;
+}
+
+.reports-list-scroll {
+  max-height: 430px;
+  overflow-y: auto;
+}
+
+.reports-leaderboard-item {
+  border-left: 3px solid rgba(37, 99, 235, 0.45);
+}
+
+.reports-prescription-item {
+  border-left: 3px solid rgba(12, 138, 130, 0.45);
+}
+
+.reports-prescription-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.reports-medications-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+  margin-top: 0.2rem;
+}
+
+@media (max-width: 900px) {
+  .reports-chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .reports-prescription-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 @media (max-width: 1180px) {
   .messaging-layout {
     grid-template-columns: minmax(0, 1fr);

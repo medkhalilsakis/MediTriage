@@ -98,6 +98,9 @@ function PatientDashboard() {
       const doctorLabel = data?.doctor_email || 'assigned doctor'
       const dateLabel = data?.scheduled_at ? new Date(data.scheduled_at).toLocaleString() : 'next available slot'
       toast.success(`Appointment booked with ${doctorLabel} on ${dateLabel}.`)
+      if (data?.booking_notice) {
+        toast(data.booking_notice)
+      }
       setAppointmentDraft(INITIAL_APPOINTMENT)
     },
     onError: (error) => {
@@ -105,8 +108,26 @@ function PatientDashboard() {
         toast.error('Patient profile not found. Please contact support.')
         return
       }
-      const detail = error?.response?.data?.detail || 'Unable to create appointment. Check the form values.'
-      toast.error(detail)
+
+      const payload = error?.response?.data || {}
+      const detail =
+        payload?.scheduled_at ||
+        payload?.detail ||
+        payload?.reason ||
+        payload?.patient ||
+        Object.values(payload)[0]
+
+      if (Array.isArray(detail) && detail.length > 0) {
+        toast.error(String(detail[0]))
+        return
+      }
+
+      if (typeof detail === 'string' && detail.trim()) {
+        toast.error(detail)
+        return
+      }
+
+      toast.error('Unable to create appointment. Check the form values.')
     },
   })
 

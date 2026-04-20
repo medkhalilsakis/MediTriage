@@ -5,6 +5,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from appointments.models import Appointment
+from chatbot.ai_service import build_health_chat_response
+from chatbot.models import ChatbotMessage, ChatbotSession
 from doctors.models import DoctorAvailabilitySlot, DoctorLeave, DoctorProfile
 from follow_up.models import FollowUp, FollowUpAlert
 from medical_records.models import Consultation, MedicalDocumentRequest, MedicalRecord
@@ -308,12 +310,14 @@ class Command(BaseCommand):
             appointments_by_marker=appointments_by_marker,
         )
         self._upsert_leave_request(admin_user=admin_user, doctor=doctors[2])
+        chatbot_sessions_count = self._upsert_chatbot_conversations(patients=patients)
 
         self.stdout.write(self.style.SUCCESS("Demo scenario successfully loaded."))
         self.stdout.write(f"Admin account: admin@{DEMO_EMAIL_DOMAIN}")
         self.stdout.write(f"Doctors created: {len(doctors)}")
         self.stdout.write(f"Patients created: {len(patients)}")
         self.stdout.write(f"Appointments created: {len(appointments_by_marker)}")
+        self.stdout.write(f"Chatbot sessions created: {chatbot_sessions_count}")
         self.stdout.write("See DEMO_PLATFORM_SCENARIO.md for the full walkthrough.")
 
     def _reset_demo_data(self):
@@ -686,6 +690,89 @@ class Command(BaseCommand):
                 "review_note": "",
             },
         )
+
+    def _upsert_chatbot_conversations(self, patients):
+        conversation_specs = [
+            {
+                "marker": "DEMO_CHAT_01",
+                "patient_index": 0,
+                "title": "[DEMO_CHAT_01] Flu-like symptoms",
+                "messages": [
+                    "I have fever, sore throat, and fatigue since yesterday.",
+                    "Symptoms are moderate and getting slightly worse.",
+                ],
+            },
+            {
+                "marker": "DEMO_CHAT_02",
+                "patient_index": 1,
+                "title": "[DEMO_CHAT_02] Cardio concern",
+                "messages": [
+                    "I feel chest discomfort when climbing stairs.",
+                    "No severe pain at rest, but I feel pressure and shortness of breath.",
+                ],
+            },
+            {
+                "marker": "DEMO_CHAT_03",
+                "patient_index": 2,
+                "title": "[DEMO_CHAT_03] Respiratory follow-up",
+                "messages": [
+                    "Persistent cough for more than one week.",
+                    "I also have mild wheezing at night.",
+                ],
+            },
+        ]
+
+        created_count = 0
+        for spec in conversation_specs:
+            patient = patients[spec["patient_index"]]
+            primary_message = spec["messages"][0]
+            assistant_payload = build_health_chat_response(
+                primary_message,
+                wants_appointment=True,
+                require_auth_for_booking=False,
+            )
+
+            session, created = ChatbotSession.objects.update_or_create(
+                patient=patient,
+                title=spec["title"],
+                defaults={
+                    "booked_appointment": None,
+                    "awaiting_appointment_confirmation": False,
+                    "latest_analysis": assistant_payload.get("analysis") or {},
+                    "is_closed": False,
+                },
+            )
+            if created:
+                created_count += 1
+
+            session.messages.all().delete()
+
+            for raw_message in spec["messages"]:
+                ChatbotMessage.objects.create(
+                    session=session,
+                    sender=ChatbotMessage.Sender.PATIENT,
+                    content=raw_message,
+                )
+
+                bot_payload = build_health_chat_response(
+                    raw_message,
+                    wants_appointment=True,
+                    require_auth_for_booking=False,
+                )
+                bot_metadata = {
+                    "response_type": bot_payload.get("response_type"),
+                }
+                if bot_payload.get("analysis"):
+                    bot_metadata["analysis"] = bot_payload["analysis"]
+
+                ChatbotMessage.objects.create(
+                    session=session,
+                    sender=ChatbotMessage.Sender.BOT,
+                    content=bot_payload.get("reply") or "No assistant response generated.",
+                    metadata=bot_metadata,
+                )
+
+        return len(conversation_specs)
 
     def _upsert_notification(self, recipient, notification_type, title, message):
         Notification.objects.get_or_create(

@@ -3,6 +3,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from appointments.models import Appointment
+from appointments.scheduling import assign_doctor_and_slot
 from authentication.models import CustomUser
 from doctors.models import DoctorProfile
 from patients.models import PatientProfile
@@ -116,6 +117,72 @@ class ChatbotConversationFlowTests(APITestCase):
 		)
 		self.assertEqual(follow_up_response.status_code, status.HTTP_201_CREATED)
 
+	def test_authenticated_chatbot_interprets_sore_throat_as_medical_symptom(self):
+		self.client.force_authenticate(user=self.patient_user)
+		session_response = self.client.post('/api/chatbot/sessions/', {'title': 'Sore throat flow'}, format='json')
+		self.assertEqual(session_response.status_code, status.HTTP_201_CREATED)
+		session_id = session_response.data['id']
+
+		message_response = self.client.post(
+			f'/api/chatbot/sessions/{session_id}/message/',
+			{'content': 'I have a sore throat.'},
+			format='json',
+		)
+		self.assertEqual(message_response.status_code, status.HTTP_201_CREATED)
+		self.assertTrue(message_response.data['session']['awaiting_appointment_confirmation'])
+
+		analysis = message_response.data.get('analysis') or {}
+		self.assertTrue(len(analysis.get('probable_diseases', [])) > 0)
+		detected = [str(item).lower() for item in analysis.get('detected_symptoms', [])]
+		self.assertTrue(any('throat' in symptom for symptom in detected))
+
+	def test_chatbot_booking_moves_to_next_available_day_when_same_day_conflict(self):
+		doctor, scheduled_at, department = assign_doctor_and_slot(requested_department=Appointment.Department.GENERAL_MEDICINE)
+		self.assertIsNotNone(doctor)
+		self.assertIsNotNone(scheduled_at)
+
+		Appointment.objects.create(
+			patient=self.patient_profile,
+			doctor=doctor,
+			scheduled_at=scheduled_at,
+			status=Appointment.Status.CONFIRMED,
+			urgency_level=Appointment.UrgencyLevel.MEDIUM,
+			department=department,
+			reason='Existing same-day appointment before chatbot confirmation',
+		)
+
+		self.client.force_authenticate(user=self.patient_user)
+		session_response = self.client.post('/api/chatbot/sessions/', {'title': 'Daily limit flow'}, format='json')
+		self.assertEqual(session_response.status_code, status.HTTP_201_CREATED)
+		session_id = session_response.data['id']
+
+		diagnosis_response = self.client.post(
+			f'/api/chatbot/sessions/{session_id}/message/',
+			{'content': 'I have fever, cough and chest discomfort.'},
+			format='json',
+		)
+		self.assertEqual(diagnosis_response.status_code, status.HTTP_201_CREATED)
+		self.assertTrue(diagnosis_response.data['session']['awaiting_appointment_confirmation'])
+
+		accept_response = self.client.post(
+			f'/api/chatbot/sessions/{session_id}/message/',
+			{'content': 'yes'},
+			format='json',
+		)
+		self.assertEqual(accept_response.status_code, status.HTTP_201_CREATED)
+		self.assertTrue(accept_response.data['appointment_booking']['created'])
+		self.assertTrue(accept_response.data['appointment_booking'].get('same_day_limit_applied'))
+		self.assertTrue(accept_response.data['appointment_booking'].get('notice'))
+
+		session = ChatbotSession.objects.get(pk=session_id)
+		self.assertTrue(session.is_closed)
+		self.assertFalse(session.awaiting_appointment_confirmation)
+		self.assertIsNotNone(session.booked_appointment_id)
+
+		self.assertEqual(Appointment.objects.filter(patient=self.patient_profile).count(), 2)
+		booked_appointment = Appointment.objects.get(pk=session.booked_appointment_id)
+		self.assertNotEqual(booked_appointment.scheduled_at.date(), scheduled_at.date())
+
 	@staticmethod
 	def _create_user(email, role):
 		return CustomUser.objects.create_user(
@@ -128,6 +195,19 @@ class ChatbotConversationFlowTests(APITestCase):
 
 
 class PublicChatbotEndpointTests(APITestCase):
+	def test_public_chatbot_interprets_sore_throat_as_health_query(self):
+		response = self.client.post(
+			'/api/chatbot/public/message/',
+			{'content': 'I have a sore throat.'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['response_type'], 'triage')
+		analysis = response.data.get('analysis') or {}
+		detected = [str(item).lower() for item in analysis.get('detected_symptoms', [])]
+		self.assertTrue(any('throat' in symptom for symptom in detected))
+
 	def test_public_chatbot_allows_anonymous_health_triage(self):
 		response = self.client.post(
 			'/api/chatbot/public/message/',

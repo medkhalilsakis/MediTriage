@@ -46,6 +46,42 @@ def assign_doctor_and_slot(requested_department, now=None):
     return chosen_doctor, chosen_slot, department
 
 
+def assign_doctor_and_slot_for_patient(
+    requested_department,
+    patient,
+    now=None,
+    exclude_appointment_id=None,
+    max_attempts=120,
+):
+    """Return first doctor/slot that respects one-appointment-per-day patient constraint."""
+    current_time = now or timezone.now()
+    first_conflicting_appointment = None
+
+    for _ in range(max_attempts):
+        doctor, scheduled_at, effective_department = assign_doctor_and_slot(
+            requested_department=requested_department,
+            now=current_time,
+        )
+        if not doctor or not scheduled_at:
+            return None, None, effective_department, first_conflicting_appointment
+
+        has_conflict, existing = patient_has_non_cancelled_appointment_same_day(
+            patient=patient,
+            slot_datetime=scheduled_at,
+            exclude_appointment_id=exclude_appointment_id,
+        )
+        if not has_conflict:
+            return doctor, scheduled_at, effective_department, first_conflicting_appointment
+
+        if first_conflicting_appointment is None:
+            first_conflicting_appointment = existing
+
+        local_slot = timezone.localtime(scheduled_at)
+        current_time = local_slot.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+    return None, None, requested_department or Appointment.Department.GENERAL_MEDICINE, first_conflicting_appointment
+
+
 def find_first_available_slot_for_doctor(doctor, start_from, exclude_appointment_id=None):
     return _find_first_available_slot(
         doctor=doctor,
@@ -64,6 +100,27 @@ def is_doctor_on_leave(doctor, at_datetime):
     local_value = timezone.localtime(at_datetime)
     leave_ranges = _get_leave_ranges(doctor)
     return _date_in_leave_ranges(local_value.date(), leave_ranges)
+
+
+def patient_has_non_cancelled_appointment_same_day(patient, slot_datetime, exclude_appointment_id=None):
+    if not patient or not slot_datetime:
+        return False, None
+
+    local_slot = timezone.localtime(slot_datetime)
+    day_start = local_slot.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    conflicts = Appointment.objects.filter(
+        patient=patient,
+        scheduled_at__gte=day_start,
+        scheduled_at__lt=day_end,
+    ).exclude(status=Appointment.Status.CANCELLED)
+
+    if exclude_appointment_id:
+        conflicts = conflicts.exclude(pk=exclude_appointment_id)
+
+    existing = conflicts.order_by('scheduled_at', 'id').first()
+    return existing is not None, existing
 
 
 def is_doctor_available_for_slot(

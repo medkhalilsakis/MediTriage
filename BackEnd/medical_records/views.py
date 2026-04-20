@@ -16,6 +16,7 @@ from appointments.scheduling import (
 	find_first_available_slot_for_doctor,
 	is_doctor_available_for_slot,
 	normalize_slot_datetime,
+	patient_has_non_cancelled_appointment_same_day,
 )
 from appointments.serializers import AppointmentSerializer
 from chatbot.models import ChatbotMessage
@@ -379,6 +380,11 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 		if not (DEFAULT_START_TIME <= local_slot.time() < DEFAULT_END_TIME):
 			raise ValidationError({'scheduled_at': 'Follow-up must be scheduled between 08:00 and 16:00.'})
 
+		self._ensure_patient_daily_limit(
+			patient=consultation.medical_record.patient,
+			slot_datetime=normalized_slot,
+		)
+
 		if not is_doctor_available_for_slot(consultation.doctor, normalized_slot):
 			raise ValidationError({'scheduled_at': 'Doctor is not available for this follow-up slot.'})
 
@@ -578,6 +584,11 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 			if not target_doctor or not normalized_slot:
 				raise ValidationError({'department': 'No available colleague found in this department.'})
 			auto_assigned_slot = True
+
+		self._ensure_patient_daily_limit(
+			patient=consultation.medical_record.patient,
+			slot_datetime=normalized_slot,
+		)
 
 		with transaction.atomic():
 			appointment = Appointment.objects.create(
@@ -795,6 +806,30 @@ class ConsultationViewSet(viewsets.ModelViewSet):
 		if not current:
 			return new_note
 		return f"{current}\n{new_note}"
+
+	@staticmethod
+	def _ensure_patient_daily_limit(patient, slot_datetime, exclude_appointment_id=None):
+		has_conflict, existing = patient_has_non_cancelled_appointment_same_day(
+			patient=patient,
+			slot_datetime=slot_datetime,
+			exclude_appointment_id=exclude_appointment_id,
+		)
+		if not has_conflict:
+			return
+
+		if existing and existing.scheduled_at:
+			existing_label = timezone.localtime(existing.scheduled_at).strftime('%Y-%m-%d %H:%M')
+		else:
+			existing_label = timezone.localtime(slot_datetime).strftime('%Y-%m-%d %H:%M')
+
+		raise ValidationError(
+			{
+				'scheduled_at': (
+					'Patient already has an appointment on this day '
+					f'({existing_label}). Only one appointment per day is allowed.'
+				)
+			}
+		)
 
 
 class DoctorOperationViewSet(viewsets.ModelViewSet):

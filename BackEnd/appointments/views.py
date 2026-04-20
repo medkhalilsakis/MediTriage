@@ -18,8 +18,10 @@ from .scheduling import (
     MAX_PATIENTS_PER_HOUR,
     SLOT_DURATION_MINUTES,
     assign_doctor_and_slot,
+    assign_doctor_and_slot_for_patient,
     is_doctor_available_for_slot,
     normalize_slot_datetime,
+    patient_has_non_cancelled_appointment_same_day,
 )
 from .serializers import AppointmentAdvanceOfferSerializer, AppointmentSerializer
 from .workflows import (
@@ -37,6 +39,14 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     filterset_fields = ['patient', 'doctor', 'status', 'urgency_level', 'department']
     search_fields = ['patient__user__email', 'doctor__user__email', 'department', 'reason', 'notes']
     ordering_fields = ['scheduled_at', 'created_at', 'updated_at']
+
+    def create(self, request, *args, **kwargs):
+        self._booking_notice = None
+        response = super().create(request, *args, **kwargs)
+        booking_notice = getattr(self, '_booking_notice', None)
+        if booking_notice and isinstance(response.data, dict):
+            response.data['booking_notice'] = booking_notice
+        return response
 
     def get_permissions(self):
         return [permissions.IsAuthenticated()]
@@ -129,6 +139,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('You do not have permission to delay this appointment.')
 
         new_slot = self._extract_validated_slot(appointment, request.data.get('scheduled_at'))
+        self._ensure_patient_daily_limit(
+            patient=appointment.patient,
+            slot_datetime=new_slot,
+            exclude_appointment_id=appointment.id,
+        )
         if not is_doctor_available_for_slot(
             doctor=appointment.doctor,
             slot_datetime=new_slot,
@@ -176,6 +191,12 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             target_slot = self._extract_validated_slot(appointment, request.data.get('scheduled_at'))
         else:
             target_slot = appointment.scheduled_at
+
+        self._ensure_patient_daily_limit(
+            patient=appointment.patient,
+            slot_datetime=target_slot,
+            exclude_appointment_id=appointment.id,
+        )
 
         if not is_doctor_available_for_slot(
             doctor=target_doctor,
@@ -226,6 +247,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             raise ValidationError({'detail': 'This appointment cannot be rescheduled.'})
 
         new_slot = self._extract_validated_slot(appointment, request.data.get('scheduled_at'))
+        self._ensure_patient_daily_limit(
+            patient=appointment.patient,
+            slot_datetime=new_slot,
+            exclude_appointment_id=appointment.id,
+        )
         if not is_doctor_available_for_slot(
             doctor=appointment.doctor,
             slot_datetime=new_slot,
@@ -263,8 +289,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             )
 
             with transaction.atomic():
-                doctor, scheduled_at, effective_department = assign_doctor_and_slot(
+                doctor, scheduled_at, effective_department, conflicting_appointment = assign_doctor_and_slot_for_patient(
                     requested_department=requested_department,
+                    patient=patient_profile,
                     now=timezone.now(),
                 )
 
@@ -280,6 +307,14 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     department=effective_department,
                     status=Appointment.Status.CONFIRMED,
                 )
+
+                if conflicting_appointment and conflicting_appointment.scheduled_at:
+                    existing_label = timezone.localtime(conflicting_appointment.scheduled_at).strftime('%Y-%m-%d %H:%M')
+                    new_label = timezone.localtime(appointment.scheduled_at).strftime('%Y-%m-%d %H:%M')
+                    self._booking_notice = (
+                        'Multiple appointments on the same day are not allowed. '
+                        f'Your existing appointment is on {existing_label}, so your new booking was moved to {new_label}.'
+                    )
 
                 self._notify_doctor_new_appointment(
                     appointment,
@@ -299,6 +334,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             if not scheduled_at:
                 raise ValidationError({'scheduled_at': 'This field is required.'})
             scheduled_at = self._ensure_slot_alignment(scheduled_at)
+            self._ensure_patient_daily_limit(
+                patient=patient,
+                slot_datetime=scheduled_at,
+            )
             if not is_doctor_available_for_slot(doctor=doctor_profile, slot_datetime=scheduled_at):
                 raise ValidationError({'scheduled_at': 'Selected slot is not available for this doctor.'})
 
@@ -327,6 +366,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if not scheduled_at:
             raise ValidationError({'scheduled_at': 'This field is required.'})
         scheduled_at = self._ensure_slot_alignment(scheduled_at)
+        self._ensure_patient_daily_limit(
+            patient=patient,
+            slot_datetime=scheduled_at,
+        )
         if not is_doctor_available_for_slot(doctor=doctor, slot_datetime=scheduled_at):
             raise ValidationError({'scheduled_at': 'Selected slot is not available for this doctor.'})
 
@@ -373,6 +416,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Doctors can only update their own appointments.')
 
         requested_doctor = serializer.validated_data.get('doctor', appointment.doctor)
+        requested_patient = serializer.validated_data.get('patient', appointment.patient)
         requested_slot = serializer.validated_data.get('scheduled_at', appointment.scheduled_at)
 
         if 'scheduled_at' in serializer.validated_data and requested_slot <= timezone.now():
@@ -381,6 +425,13 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if 'scheduled_at' in serializer.validated_data:
             requested_slot = self._ensure_slot_alignment(requested_slot)
             serializer.validated_data['scheduled_at'] = requested_slot
+
+        if 'patient' in serializer.validated_data or 'scheduled_at' in serializer.validated_data:
+            self._ensure_patient_daily_limit(
+                patient=requested_patient,
+                slot_datetime=requested_slot,
+                exclude_appointment_id=appointment.id,
+            )
 
         if 'doctor' in serializer.validated_data or 'scheduled_at' in serializer.validated_data:
             if not is_doctor_available_for_slot(
@@ -451,6 +502,30 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Only doctor or admin can manage this appointment action.')
         if user.role == 'doctor' and appointment.doctor.user_id != user.id:
             raise PermissionDenied('Doctors can only manage their own appointments.')
+
+    @staticmethod
+    def _ensure_patient_daily_limit(patient, slot_datetime, exclude_appointment_id=None):
+        has_conflict, existing = patient_has_non_cancelled_appointment_same_day(
+            patient=patient,
+            slot_datetime=slot_datetime,
+            exclude_appointment_id=exclude_appointment_id,
+        )
+        if not has_conflict:
+            return
+
+        if existing and existing.scheduled_at:
+            existing_label = timezone.localtime(existing.scheduled_at).strftime('%Y-%m-%d %H:%M')
+        else:
+            existing_label = timezone.localtime(slot_datetime).strftime('%Y-%m-%d %H:%M')
+
+        raise ValidationError(
+            {
+                'scheduled_at': (
+                    'Patient already has an appointment on this day '
+                    f'({existing_label}). Only one appointment per day is allowed.'
+                )
+            }
+        )
 
     @staticmethod
     def _notify_doctor_new_appointment(appointment, source_label='system'):

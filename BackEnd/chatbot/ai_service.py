@@ -111,6 +111,11 @@ HEALTH_DOMAIN_HINTS = {
     'dolor',
     'fiebre',
     'tos',
+    'throat',
+    'sore throat',
+    'gorge',
+    'mal de gorge',
+    'garganta',
 }
 
 RED_FLAG_SYMPTOMS = {
@@ -230,6 +235,16 @@ MULTILINGUAL_SYMPTOM_ALIASES = {
     'perte de lodorat': ('loss_of_smell',),
     'loss of taste': ('loss_of_taste',),
     'perte du gout': ('loss_of_taste',),
+    'sore throat': ('throat_irritation', 'patches_in_throat'),
+    'throat pain': ('throat_irritation',),
+    'throat irritation': ('throat_irritation',),
+    'dry throat': ('throat_irritation',),
+    'strep throat': ('patches_in_throat', 'throat_irritation'),
+    'mal de gorge': ('throat_irritation', 'patches_in_throat'),
+    'gorge irritee': ('throat_irritation',),
+    'douleur de gorge': ('throat_irritation',),
+    'dolor de garganta': ('throat_irritation', 'patches_in_throat'),
+    'irritacion de garganta': ('throat_irritation',),
 }
 
 
@@ -554,7 +569,48 @@ def _extract_symptoms_from_text(text, alias_map):
         if token in padded_text:
             detected.add(alias_map[alias])
 
+    known_symptoms = set(alias_map.values())
+    detected.update(_extract_rule_based_symptoms(normalized_text, known_symptoms))
+
     return sorted(detected)
+
+
+def _extract_rule_based_symptoms(normalized_text, known_symptoms):
+    """Capture common wording patterns not covered by exact alias matching."""
+    tokens = set(normalized_text.split())
+    if not tokens:
+        return set()
+
+    detected = set()
+
+    def add_if_known(symptom):
+        if symptom in known_symptoms:
+            detected.add(symptom)
+
+    has_throat_word = bool({'throat', 'gorge', 'garganta'} & tokens)
+    throat_pain_markers = {
+        'sore',
+        'pain',
+        'painful',
+        'hurts',
+        'hurt',
+        'aching',
+        'irritated',
+        'irritation',
+        'scratchy',
+        'dry',
+        'swollen',
+        'inflamed',
+    }
+    throat_patch_markers = {'patches', 'spots', 'tonsil', 'tonsils', 'white'}
+
+    if has_throat_word and tokens.intersection(throat_pain_markers):
+        add_if_known('throat_irritation')
+
+    if has_throat_word and tokens.intersection(throat_patch_markers):
+        add_if_known('patches_in_throat')
+
+    return detected
 
 
 def _rank_diseases(detected_symptoms, training_profiles, severity_map, disease_descriptions):

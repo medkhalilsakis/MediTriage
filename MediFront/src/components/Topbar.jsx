@@ -1,5 +1,6 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { LogOut, MessageSquare, Settings2, Sparkles } from 'lucide-react'
+import { sendPresenceHeartbeat } from '../api/messagingApi'
 import { useAuthStore } from '../store/authStore'
 
 const toTitle = (value) =>
@@ -31,7 +32,13 @@ function Topbar() {
     minute: '2-digit',
   }).format(new Date())
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await sendPresenceHeartbeat({ is_online: false })
+    } catch {
+      // Ignore best-effort presence update errors before local logout.
+    }
+
     logout()
     navigate('/login')
   }
